@@ -5,7 +5,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import calendar
-import re  # <--- 新增：用于正则匹配，实现自然排序
 
 # ==========================================
 # 🔧 1. 配置中心 (项目列表)
@@ -66,13 +65,6 @@ def load_data(file_or_url):
     except Exception as e:
         st.error(f"数据读取错误: {e}")
         return None
-
-def natural_key(text):
-    """
-    🔧 核心修复：自然排序算法 (Natural Sort)
-    将字符串拆分为数字和非数字，实现 'Block 2' < 'Block 10' 的人类逻辑
-    """
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(text))]
 
 def auto_categorize(df, method):
     """智能户型分类"""
@@ -223,7 +215,7 @@ if df is not None:
     df['Category'] = auto_categorize(df, category_method)
     df['Is_Special'] = mark_penthouse(df)
     
-    unique_cats = sorted(df['Category'].unique(), key=natural_key) # 分类也应用自然排序
+    unique_cats = sorted(df['Category'].unique())
     inventory_map = {}
 
     with inventory_container:
@@ -322,69 +314,127 @@ if df is not None:
 
     st.divider()
 
-    # --- 5.3 楼宇透视 (V9: Category Axis & Natural Sort) ---
+# 5.3 楼宇透视 (Tower View) - V12 物理结构修正版
     st.subheader("🏢 楼宇透视 (Tower View)")
-    st.caption("视觉指南：🟦 颜色越深=尺价越高 | ⬜ 浅灰=库存死筹")
+    st.caption("视觉指南：🟦 颜色越深=尺价越高 | ⬜ 浅灰=库存死筹 | ⚠️ 仅展示该楼栋物理存在的楼层")
     
     if 'BLK' in df.columns:
-        # --- 🔴 关键修复：应用自然排序 (Block 2 < Block 10) ---
+        # 楼栋选择 (自然排序)
         all_blks = sorted(df['BLK'].unique(), key=natural_key)
         selected_blk = st.selectbox("选择楼栋", all_blks)
         
         if selected_blk:
+            # === 1. 数据隔离 (只看这栋楼，不受分类影响) ===
             blk_df = df[df['BLK'] == selected_blk].copy()
-            cat_this = blk_df['Category'].iloc[0]
-            cat_df_all = df[df['Category'] == cat_this]
             
-            # 计算库存骨架
-            std_units_cat = cat_df_all[~cat_df_all['Is_Special']]
-            max_cat_floor = std_units_cat['Floor_Num'].max() if not std_units_cat.empty else 1
-            std_units_local = blk_df[~blk_df['Is_Special']]
-            local_floors = set(std_units_local['Floor_Num'].unique())
+            # === 2. 构建物理骨架 (Physical Skeleton) ===
+            # 逻辑：找出这栋楼里，所有 Stack 曾经出现过的所有楼层的"并集"
+            # 这样既能补全某个 Stack 缺失的层，又不会把别的楼层强加给它
             
-            final_floors_set = local_floors.copy()
-            if (len(local_floors) > 0) and (max(local_floors) < max_cat_floor - 2):
-                 all_cat_floors = set(std_units_cat['Floor_Num'].unique())
-                 final_floors_set = all_cat_floors
-
-            # 准备绘图 (Stack 也应用自然排序)
+            # 过滤掉非正常的楼层数据 (如 NaN)
+            valid_floors = blk_df.dropna(subset=['Floor_Num'])
+            
+            # 获取这栋楼的"楼层全集"
+            # 比如 Stack 1 卖过 2,4,6; Stack 2 卖过 4,8
+            # 并在结果为 {2,4,6,8}
+            block_floors_set = set(valid_floors['Floor_Num'].unique())
+            
+            # 过滤掉 <=0 的异常楼层
+            floors_to_plot = {f for f in block_floors_set if f > 0}
+            
+            # 排序：从低到高
+            sorted_floors_num = sorted(list(floors_to_plot))
+            
+            # 获取这栋楼的所有 Stack
             all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
-            floors_to_plot = final_floors_set.copy()
-            ph_floors = blk_df[blk_df['Is_Special']]['Floor_Num'].unique()
-            for f in ph_floors: floors_to_plot.add(f)
             
-            sorted_floors_num = sorted([f for f in list(floors_to_plot) if f > 0])
-            
+            # === 3. 填充网格 ===
             grid_data = []
+            
             for stack in all_stacks:
-                this_stack_ph = blk_df[(blk_df['Stack'] == stack) & (blk_df['Is_Special'])]['Floor_Num'].unique()
-                stack_theoretical = final_floors_set.union(set(this_stack_ph))
+                # 默认该 Stack 拥有本栋楼的所有楼层 (矩阵补全)
+                # 除非是那种极为特殊的"缺角楼"，但在新加坡很少见，通常同一栋楼结构一致
                 
                 for floor in sorted_floors_num:
-                    if floor in stack_theoretical:
-                        match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
-                        if not match.empty:
-                            latest = match.sort_values('Sale Date', ascending=False).iloc[0]
-                            grid_data.append({
-                                'Stack': str(stack), 'Floor': str(int(floor)), 'Floor_Int': int(floor),
-                                'Type': 'Sold', 'PSF': int(latest['Sale PSF']),
-                                'Price': f"${latest['Sale Price']/1e6:.2f}M", 'Year': latest['Sale Year']
-                            })
-                        else:
-                            grid_data.append({
-                                'Stack': str(stack), 'Floor': str(int(floor)), 'Floor_Int': int(floor),
-                                'Type': 'Stock', 'PSF': None, 'Price': '-', 'Year': '-'
-                            })
+                    # 查找交易记录
+                    match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
+                    
+                    if not match.empty:
+                        latest = match.sort_values('Sale Date', ascending=False).iloc[0]
+                        grid_data.append({
+                            'Stack': str(stack),
+                            'Floor': str(int(floor)), # 转字符串用于分类轴
+                            'Floor_Int': int(floor),
+                            'Type': 'Sold',
+                            'PSF': int(latest['Sale PSF']),
+                            'Price': f"${latest['Sale Price']/1e6:.2f}M",
+                            'Year': latest['Sale Year']
+                        })
+                    else:
+                        # 没卖过 -> 库存
+                        grid_data.append({
+                            'Stack': str(stack),
+                            'Floor': str(int(floor)),
+                            'Floor_Int': int(floor),
+                            'Type': 'Stock',
+                            'PSF': None,
+                            'Price': '-',
+                            'Year': '-'
+                        })
 
             viz_df = pd.DataFrame(grid_data)
             
             if not viz_df.empty:
                 fig_tower = go.Figure()
+                
+                # 构造 Y 轴顺序 (强制数字顺序，否则 "10" 会排在 "2" 前面)
                 y_category_order = [str(f) for f in sorted_floors_num]
 
-                # 层1：库存
+                # 层1：库存背景 (灰色)
                 fig_tower.add_trace(go.Heatmap(
-                    x=viz_df['Stack'], y=viz_df['Floor'], z=[1]*len(viz_df),
+                    x=viz_df['Stack'],
+                    y=viz_df['Floor'],
+                    z=[1] * len(viz_df), # 纯色背景
+                    colorscale=[[0, '#eeeeee'], [1, '#eeeeee']],
+                    showscale=False,
+                    xgap=2, ygap=2, # 网格间隙
+                    hoverinfo='skip'
+                ))
+
+                # 层2：成交数据 (彩色)
+                sold_df = viz_df[viz_df['Type'] == 'Sold']
+                if not sold_df.empty:
+                    fig_tower.add_trace(go.Heatmap(
+                        x=sold_df['Stack'],
+                        y=sold_df['Floor'],
+                        z=sold_df['PSF'],
+                        colorscale='Teal',
+                        colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
+                        xgap=2, ygap=2,
+                        hovertemplate=
+                        "<b>Stack %{x} - #%{y}</b><br>" +
+                        "💰 PSF: $%{z}<br>" +
+                        "🏷️ 总价: %{customdata[0]}<br>" +
+                        "📅 年份: %{customdata[1]}<extra></extra>",
+                        customdata=sold_df[['Price', 'Year']]
+                    ))
+
+                # === 4. 布局优化 ===
+                fig_tower.update_layout(
+                    title=dict(text=f"Block {selected_blk} - 物理透视图", x=0.5),
+                    xaxis=dict(
+                        title="Stack (单元号)",
+                        type='category',
+                        side='bottom'
+                    ),
+                    yaxis=dict(
+                        title="Floor (楼层)",
+                        type='category', # 强制分类轴 (不显示不存在的楼层)
+                        categoryorder='array', 
+                        categoryarray=y_category_order, # 强制正确排序
+                        dtick=1
+                    ),
+                    plot_bgcolor='                    x=viz_df['Stack'], y=viz_df['Floor'], z=[1]*len(viz_df),
                     colorscale=[[0, '#eeeeee'], [1, '#eeeeee']], showscale=False,
                     xgap=2, ygap=2, hoverinfo='skip'
                 ))
