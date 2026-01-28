@@ -7,20 +7,24 @@ from datetime import datetime, timedelta
 import calendar
 
 # ==========================================
-# 🔧 配置中心 (在此处粘贴您的 Google CSV 链接)
+# 🔧 安全配置中心 (从 Secrets 读取)
 # ==========================================
-PROJECTS = {
-    # 格式："项目名称": "CSV链接"
-    "📂 手动上传 CSV": None,  # 保留此项以便测试本地文件
+try:
+    # 尝试从 Streamlit Secrets 读取项目列表
+    # dict() 将其转换为标准字典，方便后续操作
+    project_config = dict(st.secrets["projects"])
     
-    "🏢 Braddell View": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQxxxx.../pub?output=csv", 
+    # 将"手动上传"添加到选项的最前面
+    PROJECTS = {"📂 手动上传 CSV": None}
+    PROJECTS.update(project_config)
     
-    "🌲 Pine Grove": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQyyyy.../pub?output=csv",
-    
-    "🌊 Mandarin Gardens": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQzzzz.../pub?output=csv",
-    
-    # 您可以在这里继续添加新项目...
-}
+except FileNotFoundError:
+    # 如果没找到 secrets (比如刚下载还没配置时)，只保留手动上传
+    st.warning("⚠️ 未检测到云端配置文件 (Secrets)。仅支持手动上传模式。")
+    PROJECTS = {"📂 手动上传 CSV": None}
+except Exception as e:
+    st.error(f"配置文件读取错误: {e}")
+    PROJECTS = {"📂 手动上传 CSV": None}
 
 # --- 1. 页面基础配置 ---
 st.set_page_config(page_title="HAO数据中台 Pro", layout="wide", page_icon="🧭")
