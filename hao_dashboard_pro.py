@@ -50,23 +50,71 @@ with st.sidebar:
 
 # --- 数据处理函数 ---
 @st.cache_data(ttl=600) # 缓存10分钟，避免频繁读取
+# --- 数据处理函数 (智能修复版) ---
+@st.cache_data(ttl=600)
 def load_data(source_type, file_or_url):
     try:
+        # 1. 初步读取
         if source_type == "📂 手动上传 CSV":
             if file_or_url is None: return None
+            # 手动上传的文件对象需要重置指针，防止读取空文件
+            file_or_url.seek(0)
             df = pd.read_csv(file_or_url)
         else:
             df = pd.read_csv(file_or_url)
             
-        # 基础清洗逻辑 (同之前)
-        # ... (此处省略重复的清洗代码，保持之前的逻辑即可) ...
-        # 模拟清洗过程:
+        # 2. 智能寻找表头 (关键修复步骤!)
+        # 如果第一列里没有 'BLK' 也没有 'Sale Date'，说明读到了 Disclaimer
+        # 我们往下找 10 行，看看哪一行才是真的表头
+        if 'Sale Date' not in df.columns and 'BLK' not in df.columns:
+            # 重新读取前20行，不带表头
+            if source_type == "📂 手动上传 CSV":
+                file_or_url.seek(0)
+            
+            # 临时读一下，找 Header 行号
+            df_temp = pd.read_csv(file_or_url, header=None, nrows=20)
+            
+            # 遍历寻找包含 "Sale Date" 或 "BLK" 的行
+            header_row_index = -1
+            for i, row in df_temp.iterrows():
+                row_str = row.astype(str).str.cat(sep=',')
+                if "Sale Date" in row_str or "BLK" in row_str:
+                    header_row_index = i
+                    break
+            
+            # 如果找到了真正的表头行，重新读取
+            if header_row_index != -1:
+                if source_type == "📂 手动上传 CSV":
+                    file_or_url.seek(0)
+                df = pd.read_csv(file_or_url, header=header_row_index)
+        
+        # 3. 再次确认列名 (去除空格，防止 ' Sale Price' 这种错误)
+        df.columns = df.columns.str.strip()
+        
+        # 4. 数据清洗 (保持不变)
         if 'Sale Price' in df.columns:
-             df['Sale Price'] = df['Sale Price'].astype(str).str.replace(r'[$,]', '', regex=True).astype(float)
+             df['Sale Price'] = df['Sale Price'].astype(str).str.replace(r'[$,]', '', regex=True)
+             df['Sale Price'] = pd.to_numeric(df['Sale Price'], errors='coerce')
+             
+        if 'Sale PSF' in df.columns:
+             df['Sale PSF'] = df['Sale PSF'].astype(str).str.replace(r'[$,]', '', regex=True)
+             df['Sale PSF'] = pd.to_numeric(df['Sale PSF'], errors='coerce')
+             
+        if 'Area (sqft)' in df.columns:
+             df['Area (sqft)'] = df['Area (sqft)'].astype(str).str.replace(r'[,]', '', regex=True)
+             df['Area (sqft)'] = pd.to_numeric(df['Area (sqft)'], errors='coerce')
+             
         if 'Sale Date' in df.columns:
-            df['Sale Date'] = pd.to_datetime(df['Sale Date'])
+            df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
+
+        # 5. 最终检查：如果还是没有 Sale Year，那就是文件格式太奇怪了
+        if 'Sale Year' not in df.columns:
+            st.error("错误：无法在文件中找到 'Sale Date' 列。请检查 CSV 文件格式。")
+            return None
+            
         return df
+        
     except Exception as e:
         st.error(f"数据加载失败: {e}")
         return None
