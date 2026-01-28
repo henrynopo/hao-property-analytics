@@ -168,74 +168,40 @@ def estimate_inventory(df, category_col='Category'):
     return category_totals
 
 def get_dynamic_floor_premium(df, category):
-    """
-    🔍 V20: 数据驱动的动态楼层溢价拟合
-    逻辑：在同 Stack 内寻找交易时间相近（<2年）的交易对，计算垂直价差
-    """
-    # 1. 筛选同类数据
+    """V20: 动态楼层溢价"""
     cat_df = df[df['Category'] == category].copy()
-    if cat_df.empty: return 0.005 # 默认 0.5%
+    if cat_df.empty: return 0.005
     
-    # 2. 只看最近 5 年的数据（太老的数据楼层差价可能不具备参考性）
     recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
     recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
     
-    # 3. 按 (Block, Stack) 分组，寻找 Pair
     grouped = recent_df.groupby(['BLK', 'Stack'])
     rates = []
     
     for _, group in grouped:
         if len(group) < 2: continue
-        
-        # 将组内数据转为列表，两两比对
         recs = group.to_dict('records')
         for i in range(len(recs)):
             for j in range(i + 1, len(recs)):
-                r1 = recs[i]
-                r2 = recs[j]
-                
-                # A. 时间过滤：交易时间差不超过 18 个月 (视为同期市场)
-                days_diff = abs((r1['Sale Date'] - r2['Sale Date']).days)
-                if days_diff > 540: continue
-                
-                # B. 楼层过滤：必须有楼层差
+                r1, r2 = recs[i], recs[j]
+                if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
                 floor_diff = r1['Floor_Num'] - r2['Floor_Num']
                 if floor_diff == 0: continue
                 
-                # C. 计算价差率 (Per Floor)
-                # 公式：(PSF_High - PSF_Low) / PSF_Low / Floor_Diff
-                # 注意：r1, r2 谁高谁低不确定，统一计算
+                if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
+                else: high, low, f_delta = r2, r1, -floor_diff
                 
-                # 以楼层低的为基准
-                if r1['Floor_Num'] > r2['Floor_Num']:
-                    high, low = r1, r2
-                    f_delta = floor_diff
-                else:
-                    high, low = r2, r1
-                    f_delta = -floor_diff
-                
-                psf_delta_pct = (high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']
-                rate = psf_delta_pct / f_delta
-                
-                # D. 异常值过滤：合理的楼层溢价应该在 -0.5% 到 +3% 之间
-                if -0.005 < rate < 0.03: 
-                    rates.append(rate)
+                rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
+                if -0.005 < rate < 0.03: rates.append(rate)
 
-    # 4. 汇总计算
     if len(rates) >= 3:
-        # 取中位数，抗干扰
         fitted_rate = float(np.median(rates))
-        # 兜底范围：0.1% ~ 1.5% (防止拟合出负数或天价)
         return max(0.001, min(0.015, fitted_rate))
     else:
-        # 数据不足，返回行业标准 0.5%
         return 0.005
 
 def calculate_avm(df, blk, stack, floor):
-    """
-    🤖 AVM 自动估值模型 (V3: 动态拟合溢价)
-    """
-    # 1. 确定目标单元面积
+    """🤖 AVM 自动估值模型 (V3: 动态溢价 + 对标)"""
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
     if not target_unit.empty:
@@ -249,15 +215,9 @@ def calculate_avm(df, blk, stack, floor):
         else:
             return None, None, None, None, None, pd.DataFrame()
 
-    # 2. 筛选对标 (Comps)
     last_date = df['Sale Date'].max()
-    cutoff_date = last_date - timedelta(days=365) # 最近一年
-    
-    comps = df[
-        (df['Category'] == subject_cat) & 
-        (df['Sale Date'] >= cutoff_date) &
-        (~df['Is_Special']) 
-    ].copy()
+    cutoff_date = last_date - timedelta(days=365)
+    comps = df[(df['Category'] == subject_cat) & (df['Sale Date'] >= cutoff_date) & (~df['Is_Special'])].copy()
     
     if len(comps) < 3:
         comps = df[(df['Category'] == subject_cat) & (~df['Is_Special'])].sort_values('Sale Date', ascending=False).head(10)
@@ -265,15 +225,7 @@ def calculate_avm(df, blk, stack, floor):
     if comps.empty:
         return subject_area, 0, 0, 0, 0.005, pd.DataFrame()
 
-    # 3. 动态计算楼层溢价率 (Dynamic Premium Rate)
-    # 使用全量数据拟合，不仅仅是最近一年的 Comps，以保证准确性
     premium_rate = get_dynamic_floor_premium(df, subject_cat)
-
-    # 4. 计算基准 PSF
-    # 基准：取 Comps 的中位数 PSF，并将其"归一化"到基准楼层
-    # 比如 Comps 平均是 10 楼，1500psf。那我们先把这 1500psf 还原成 "0楼" 的价格，再算目标楼层
-    # 或者简单点：直接以 Comps 的中位楼层为锚点
-    
     base_psf = comps['Sale PSF'].median()      
     base_floor = comps['Floor_Num'].median()   
     
@@ -283,7 +235,6 @@ def calculate_avm(df, blk, stack, floor):
     estimated_psf = base_psf * adjustment_factor
     valuation = subject_area * estimated_psf
     
-    # 整理展示数据
     comps_display = comps.sort_values('Sale Date', ascending=False).head(5)
     comps_display['Sale Date'] = comps_display['Sale Date'].dt.date
     comps_display = comps_display[['Sale Date', 'BLK', 'Stack', 'Floor', 'Area (sqft)', 'Sale PSF', 'Sale Price']]
@@ -370,258 +321,296 @@ if df is not None:
 
     total_project_inventory = sum(inventory_map.values())
     
-    # --- 5.1 KPI ---
     st.title(f"🏙️ {project_name} 市场透视")
     st.caption(f"数据范围: {df['Sale Date'].min().date()} 至 {df['Sale Date'].max().date()} | 总交易: {len(df)} 宗")
 
-    current_year = datetime.now().year 
-    df_this_year = df[df['Sale Year'] == current_year]
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric(f"{current_year}年 成交量", f"{len(df_this_year)} 宗")
-    if len(df_this_year) > 0:
-        col2.metric(f"{current_year} 均尺价", f"${df_this_year['Sale PSF'].mean():,.0f} psf")
-        col3.metric(f"{current_year} 最高价", f"${df_this_year['Sale Price'].max()/1e6:.2f}M")
-    else:
-        col2.metric(f"{current_year} 均尺价", "-")
-        col3.metric(f"{current_year} 最高价", "-")
-    
-    turnover_ytd = (len(df_this_year) / total_project_inventory * 100) if total_project_inventory > 0 else 0
-    col4.metric(f"{current_year} 整体换手率", f"{turnover_ytd:.2f}%")
+    # === Tab 布局重构 ===
+    tab1, tab2, tab3 = st.tabs(["📊 市场概览 (Overview)", "🏢 楼宇透视 & AVM (Valuation)", "📝 详细成交记录 (Transacitons)"])
 
-    st.divider()
-
-    # --- 5.2 趋势图 ---
-    st.subheader("📈 价格与成交量趋势")
-    col_ctrl1, col_ctrl2 = st.columns([1, 3])
-    with col_ctrl1:
-        freq_map = {"年 (Year)": "Y", "季度 (Quarter)": "Q", "月 (Month)": "M"}
-        freq_sel = st.selectbox("时间粒度", list(freq_map.keys()))
-        freq_code = freq_map[freq_sel]
+    # --- Tab 1: 市场概览 ---
+    with tab1:
+        current_year = datetime.now().year 
+        df_this_year = df[df['Sale Year'] == current_year]
         
-        min_d = df['Sale Date'].min().date().replace(day=1)
-        max_d_raw = df['Sale Date'].max().date()
-        last_day = calendar.monthrange(max_d_raw.year, max_d_raw.month)[1]
-        max_d = max_d_raw.replace(day=last_day)
-        date_range = st.date_input("选择时间范围", [min_d, max_d])
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric(f"{current_year}年 成交量", f"{len(df_this_year)} 宗")
+        if len(df_this_year) > 0:
+            col2.metric(f"{current_year} 均尺价", f"${df_this_year['Sale PSF'].mean():,.0f} psf")
+            col3.metric(f"{current_year} 最高价", f"${df_this_year['Sale Price'].max()/1e6:.2f}M")
+        else:
+            col2.metric(f"{current_year} 均尺价", "-")
+            col3.metric(f"{current_year} 最高价", "-")
+        
+        turnover_ytd = (len(df_this_year) / total_project_inventory * 100) if total_project_inventory > 0 else 0
+        col4.metric(f"{current_year} 整体换手率", f"{turnover_ytd:.2f}%")
 
-    if len(date_range) == 2:
-        start_d = pd.to_datetime(date_range[0])
-        end_d = pd.to_datetime(date_range[1]) + timedelta(days=1) - timedelta(seconds=1)
-        mask = (df['Sale Date'] >= start_d) & (df['Sale Date'] <= end_d)
-        df_filtered = df.loc[mask]
-    else:
-        df_filtered = df
-
-    trend_data = df_filtered.set_index('Sale Date').groupby('Category').resample(freq_code).agg({
-        'Sale PSF': 'mean', 'Sale Price': 'count'
-    }).rename(columns={'Sale Price': 'Volume'}).reset_index()
-
-    fig = px.line(
-        trend_data, x='Sale Date', y='Sale PSF', color='Category', 
-        markers=True, symbol='Category',
-        title=f"{project_name} 尺价走势 ({freq_sel})",
-        color_discrete_sequence=[chart_color, "#2E86C1", "#28B463", "#D35400", "#8E44AD"]
-    )
-    fig.update_traces(connectgaps=True)
-    fig.update_layout(
-        font=dict(size=chart_font_size, family="Arial"),
-        title=dict(font=dict(size=chart_font_size + 4)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=None),
-        hovermode="x unified"
-    )
-    st.plotly_chart(fig, use_container_width=True, config={
-        'displayModeBar': True,
-        'toImageButtonOptions': {'format': 'png', 'filename': f'{project_name}_trend', 'height': exp_height, 'width': exp_width, 'scale': exp_scale},
-        'displaylogo': False
-    })
-
-    st.divider()
-
-    # --- 5.3 楼宇透视 (V20: 动态溢价展示) ---
-    st.subheader("🏢 楼宇透视 (Tower View)")
-    st.caption("👈 **操作指南**：点击方格或下拉选择，查看带楼层溢价的估值。")
-    
-    if 'BLK' in df.columns:
-        all_blks = sorted(df['BLK'].unique(), key=natural_key)
-        try:
-            selected_blk = st.pills("选择楼栋:", all_blks, selection_mode="single", default=all_blks[0])
-        except AttributeError:
-            selected_blk = st.radio("选择楼栋:", all_blks, horizontal=True)
-
-        if selected_blk:
-            blk_df = df[df['BLK'] == selected_blk].copy()
+        st.divider()
+        st.subheader("📈 价格与成交量趋势")
+        
+        col_ctrl1, col_ctrl2 = st.columns([1, 3])
+        with col_ctrl1:
+            freq_map = {"年 (Year)": "Y", "季度 (Quarter)": "Q", "月 (Month)": "M"}
+            freq_sel = st.selectbox("时间粒度", list(freq_map.keys()))
+            freq_code = freq_map[freq_sel]
             
-            # --- 构建物理骨架 ---
-            valid_floors = blk_df.dropna(subset=['Floor_Num'])
-            block_floors_set = set(valid_floors['Floor_Num'].unique())
-            floors_to_plot = {f for f in block_floors_set if f > 0}
-            sorted_floors_num = sorted(list(floors_to_plot))
-            all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
-            
-            # --- 填充数据 ---
-            grid_data = []
-            for stack in all_stacks:
-                for floor in sorted_floors_num:
-                    match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
-                    
-                    # 🟢 格式: #01-01
-                    stack_str = str(stack).strip()
-                    if stack_str.isdigit():
-                        stack_fmt = stack_str.zfill(2)
-                    else:
-                        stack_fmt = stack_str
-                    unit_label = f"#{int(floor):02d}-{stack_fmt}"
-                    
-                    if not match.empty:
-                        latest = match.sort_values('Sale Date', ascending=False).iloc[0]
-                        grid_data.append({
-                            'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Sold',
-                            'PSF': int(latest['Sale PSF']), 'Price': f"${latest['Sale Price']/1e6:.2f}M", 
-                            'Year': latest['Sale Year'],
-                            'Raw_Floor': int(floor), 'Label': unit_label,
-                            'Fmt_Stack': stack_fmt 
-                        })
-                    else:
-                        grid_data.append({
-                            'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Stock',
-                            'PSF': None, 'Price': '-', 'Year': '-',
-                            'Raw_Floor': int(floor), 'Label': unit_label,
-                            'Fmt_Stack': stack_fmt
-                        })
-            
-            viz_df = pd.DataFrame(grid_data)
-            
-            if not viz_df.empty:
-                fig_tower = go.Figure()
-                y_category_order = [str(f) for f in sorted_floors_num]
-                
-                # 层1：库存
-                stock_df = viz_df[viz_df['Type'] == 'Stock']
-                if not stock_df.empty:
-                    fig_tower.add_trace(go.Heatmap(
-                        x=stock_df['Stack'], y=stock_df['Floor'], z=[1]*len(stock_df),
-                        colorscale=[[0, '#eeeeee'], [1, '#eeeeee']], showscale=False, xgap=2, ygap=2, hoverinfo='text',
-                        text=stock_df['Label'] + "<br>库存 (点击估值)",
-                        customdata=stock_df[['Stack', 'Raw_Floor']]
-                    ))
+            min_d = df['Sale Date'].min().date().replace(day=1)
+            max_d_raw = df['Sale Date'].max().date()
+            last_day = calendar.monthrange(max_d_raw.year, max_d_raw.month)[1]
+            max_d = max_d_raw.replace(day=last_day)
+            date_range = st.date_input("选择时间范围", [min_d, max_d])
 
-                # 层2：成交
-                sold_df = viz_df[viz_df['Type'] == 'Sold']
-                if not sold_df.empty:
-                    fig_tower.add_trace(go.Heatmap(
-                        x=sold_df['Stack'], y=sold_df['Floor'], z=sold_df['PSF'],
-                        colorscale='Teal', colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
-                        xgap=2, ygap=2,
-                        hovertemplate="<b>%{customdata[2]}</b><br>💰 PSF: $%{z}<br>🏷️ 总价: %{customdata[3]}<br>📅 年份: %{customdata[4]}<extra></extra>",
-                        customdata=sold_df[['Stack', 'Raw_Floor', 'Label', 'Price', 'Year']]
-                    ))
+        if len(date_range) == 2:
+            start_d = pd.to_datetime(date_range[0])
+            end_d = pd.to_datetime(date_range[1]) + timedelta(days=1) - timedelta(seconds=1)
+            mask = (df['Sale Date'] >= start_d) & (df['Sale Date'] <= end_d)
+            df_filtered = df.loc[mask]
+        else:
+            df_filtered = df
 
-                fig_tower.update_layout(
-                    title=dict(text=f"Block {selected_blk} - 物理透视图", x=0.5),
-                    xaxis=dict(title="Stack", type='category', side='bottom'),
-                    yaxis=dict(title="Floor", type='category', categoryorder='array', categoryarray=y_category_order, dtick=1),
-                    plot_bgcolor='white',
-                    height=max(400, len(y_category_order) * 35), width=min(1000, 100 * len(all_stacks) + 200),
-                    margin=dict(l=50, r=50, t=60, b=50),
-                    clickmode='event+select'
-                )
-                
-                event = st.plotly_chart(
-                    fig_tower, 
-                    use_container_width=True, 
-                    on_select="rerun", 
-                    selection_mode="points", 
-                    key=f"chart_v20_{selected_blk}", 
-                    config={'toImageButtonOptions': {'format': 'png', 'height': exp_height, 'width': exp_width, 'scale': exp_scale}}
-                )
-                
-                # --- 兜底方案：手动选择器 ---
-                st.markdown("---")
-                c_sel1, c_sel2 = st.columns([1, 3])
-                
-                with c_sel1:
-                    st.write("#### 🔎 单元估值")
-                    st.caption("选择单元查看详情：")
-                
-                with c_sel2:
-                    unit_options = sorted(viz_df['Label'].unique(), key=natural_key)
-                    default_idx = 0
-                    
-                    if event and "selection" in event and event["selection"]["points"]:
-                        point = event["selection"]["points"][0]
-                        if "customdata" in point:
-                            click_stack = str(point["customdata"][0]) 
-                            click_floor = int(point["customdata"][1]) 
-                            
-                            s_str = str(click_stack).strip()
-                            s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
-                            click_label = f"#{click_floor:02d}-{s_fmt}"
-                            
-                            if click_label in unit_options:
-                                default_idx = unit_options.index(click_label)
-                    
-                    selected_unit_label = st.selectbox(
-                        "单元列表:", 
-                        unit_options, 
-                        index=default_idx,
-                        key=f"manual_sel_{selected_blk}",
-                        label_visibility="collapsed"
-                    )
+        trend_data = df_filtered.set_index('Sale Date').groupby('Category').resample(freq_code).agg({
+            'Sale PSF': 'mean', 'Sale Price': 'count'
+        }).rename(columns={'Sale Price': 'Volume'}).reset_index()
 
-                # --- 统一执行估值逻辑 ---
-                if selected_unit_label:
-                    try:
-                        parts = re.search(r"#(\d+)-(.*)", selected_unit_label)
+        fig = px.line(
+            trend_data, x='Sale Date', y='Sale PSF', color='Category', 
+            markers=True, symbol='Category',
+            title=f"{project_name} 尺价走势 ({freq_sel})",
+            color_discrete_sequence=[chart_color, "#2E86C1", "#28B463", "#D35400", "#8E44AD"]
+        )
+        fig.update_traces(connectgaps=True)
+        fig.update_layout(
+            font=dict(size=chart_font_size, family="Arial"),
+            title=dict(font=dict(size=chart_font_size + 4)),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=None),
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    # --- Tab 2: 楼宇透视 & AVM ---
+    with tab2:
+        st.subheader("🏢 楼宇透视 (Tower View)")
+        st.caption("👈 **操作指南**：点击方格或下拉选择，查看带楼层溢价的估值。")
+        
+        if 'BLK' in df.columns:
+            all_blks = sorted(df['BLK'].unique(), key=natural_key)
+            try:
+                selected_blk = st.pills("选择楼栋:", all_blks, selection_mode="single", default=all_blks[0])
+            except AttributeError:
+                selected_blk = st.radio("选择楼栋:", all_blks, horizontal=True)
+
+            if selected_blk:
+                blk_df = df[df['BLK'] == selected_blk].copy()
+                
+                # 构建物理骨架
+                valid_floors = blk_df.dropna(subset=['Floor_Num'])
+                block_floors_set = set(valid_floors['Floor_Num'].unique())
+                floors_to_plot = {f for f in block_floors_set if f > 0}
+                sorted_floors_num = sorted(list(floors_to_plot))
+                all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
+                
+                # 填充数据
+                grid_data = []
+                for stack in all_stacks:
+                    for floor in sorted_floors_num:
+                        match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
+                        stack_str = str(stack).strip()
+                        stack_fmt = stack_str.zfill(2) if stack_str.isdigit() else stack_str
+                        unit_label = f"#{int(floor):02d}-{stack_fmt}"
                         
-                        if parts:
-                            sel_floor = int(parts.group(1))
-                            sel_stack_fmt = parts.group(2)
-                            
-                            row = viz_df[viz_df['Label'] == selected_unit_label].iloc[0]
-                            sel_stack_raw = row['Stack']
-                            
-                            st.divider()
-                            st.markdown(f"### 💎 AVM 估值报告: {selected_blk} {selected_unit_label}")
-                            
-                            # 运行 AVM (V3: 动态溢价)
-                            area, est_psf, value, floor_diff, premium_rate, comps_df = calculate_avm(df, selected_blk, sel_stack_raw, sel_floor)
-                            
-                            if area:
-                                c1, c2, c3 = st.columns(3)
-                                c1.metric("📐 单元面积", f"{int(area):,} sqft")
-                                
-                                delta_color = "normal"
-                                if floor_diff > 0: delta_color = "normal"
-                                elif floor_diff < 0: delta_color = "inverse"
-                                
-                                # 🟢 动态展示拟合出的溢价率
-                                premium_txt = f"{premium_rate*100:.1f}%"
-                                c2.metric(
-                                    f"📊 估算 PSF (溢价率: {premium_txt})", 
-                                    f"${int(est_psf):,} psf",
-                                    f"{floor_diff:+.0f} 层 (对比均值)",
-                                    delta_color=delta_color
-                                )
-                                c3.metric("💰 银行估值 (Est. Value)", f"${value/1e6:.2f}M")
-                                
-                                st.write("##### 📜 该单元历史交易")
-                                history = df[(df['BLK'] == selected_blk) & (df['Stack'] == sel_stack_raw) & (df['Floor_Num'] == sel_floor)].copy()
-                                if not history.empty:
-                                    history['Sale Date'] = history['Sale Date'].dt.date
-                                    st.dataframe(history[['Sale Date', 'Sale Price', 'Sale PSF', 'Area (sqft)']].sort_values('Sale Date', ascending=False), hide_index=True)
-                                else:
-                                    st.info("该单元历史上暂无交易记录 (New/Stock)")
-                                    
-                                st.write(f"##### ⚖️ 估值参考 (最近 {len(comps_df)} 笔相似成交)")
-                                if not comps_df.empty:
-                                    st.dataframe(comps_df, use_container_width=True, hide_index=True)
-                            else:
-                                st.error("无法获取数据。")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                        if not match.empty:
+                            latest = match.sort_values('Sale Date', ascending=False).iloc[0]
+                            grid_data.append({
+                                'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Sold',
+                                'PSF': int(latest['Sale PSF']), 'Price': f"${latest['Sale Price']/1e6:.2f}M", 
+                                'Year': latest['Sale Year'], 'Raw_Floor': int(floor), 'Label': unit_label, 'Fmt_Stack': stack_fmt 
+                            })
+                        else:
+                            grid_data.append({
+                                'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Stock',
+                                'PSF': None, 'Price': '-', 'Year': '-', 'Raw_Floor': int(floor), 'Label': unit_label, 'Fmt_Stack': stack_fmt
+                            })
+                
+                viz_df = pd.DataFrame(grid_data)
+                
+                if not viz_df.empty:
+                    fig_tower = go.Figure()
+                    y_category_order = [str(f) for f in sorted_floors_num]
+                    
+                    # 层1：库存
+                    stock_df = viz_df[viz_df['Type'] == 'Stock']
+                    if not stock_df.empty:
+                        fig_tower.add_trace(go.Heatmap(
+                            x=stock_df['Stack'], y=stock_df['Floor'], z=[1]*len(stock_df),
+                            colorscale=[[0, '#eeeeee'], [1, '#eeeeee']], showscale=False, xgap=2, ygap=2, hoverinfo='text',
+                            text=stock_df['Label'] + "<br>库存 (点击估值)", customdata=stock_df[['Stack', 'Raw_Floor']]
+                        ))
 
-            else:
-                st.warning(f"Block {selected_blk} 没有有效的楼层数据。")
-    else:
-        st.warning("CSV 缺少 BLK 列")
+                    # 层2：成交
+                    sold_df = viz_df[viz_df['Type'] == 'Sold']
+                    if not sold_df.empty:
+                        fig_tower.add_trace(go.Heatmap(
+                            x=sold_df['Stack'], y=sold_df['Floor'], z=sold_df['PSF'],
+                            colorscale='Teal', colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
+                            xgap=2, ygap=2,
+                            hovertemplate="<b>%{customdata[2]}</b><br>💰 PSF: $%{z}<br>🏷️ 总价: %{customdata[3]}<br>📅 年份: %{customdata[4]}<extra></extra>",
+                            customdata=sold_df[['Stack', 'Raw_Floor', 'Label', 'Price', 'Year']]
+                        ))
+
+                    fig_tower.update_layout(
+                        title=dict(text=f"Block {selected_blk} - 物理透视图", x=0.5),
+                        xaxis=dict(title="Stack", type='category', side='bottom'),
+                        yaxis=dict(title="Floor", type='category', categoryorder='array', categoryarray=y_category_order, dtick=1),
+                        plot_bgcolor='white', height=max(400, len(y_category_order) * 35), 
+                        width=min(1000, 100 * len(all_stacks) + 200), margin=dict(l=50, r=50, t=60, b=50),
+                        clickmode='event+select'
+                    )
+                    
+                    event = st.plotly_chart(
+                        fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
+                        key=f"chart_v21_{selected_blk}", config={'displayModeBar': False}
+                    )
+                    
+                    # --- AVM 估值模块 ---
+                    st.markdown("---")
+                    c_sel1, c_sel2 = st.columns([1, 3])
+                    
+                    with c_sel1:
+                        st.write("#### 🔎 单元估值")
+                        st.caption("选择单元查看详情：")
+                    
+                    with c_sel2:
+                        unit_options = sorted(viz_df['Label'].unique(), key=natural_key)
+                        default_idx = 0
+                        
+                        if event and "selection" in event and event["selection"]["points"]:
+                            point = event["selection"]["points"][0]
+                            if "customdata" in point:
+                                click_stack = str(point["customdata"][0]) 
+                                click_floor = int(point["customdata"][1]) 
+                                s_str = str(click_stack).strip()
+                                s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
+                                click_label = f"#{click_floor:02d}-{s_fmt}"
+                                if click_label in unit_options: default_idx = unit_options.index(click_label)
+                        
+                        selected_unit_label = st.selectbox(
+                            "单元列表:", unit_options, index=default_idx, key=f"manual_sel_{selected_blk}", label_visibility="collapsed"
+                        )
+
+                    if selected_unit_label:
+                        try:
+                            parts = re.search(r"#(\d+)-(.*)", selected_unit_label)
+                            if parts:
+                                sel_floor = int(parts.group(1))
+                                sel_stack_fmt = parts.group(2)
+                                row = viz_df[viz_df['Label'] == selected_unit_label].iloc[0]
+                                sel_stack_raw = row['Stack']
+                                
+                                st.divider()
+                                st.markdown(f"### 💎 AVM 估值报告: {selected_blk} {selected_unit_label}")
+                                
+                                area, est_psf, value, floor_diff, premium_rate, comps_df = calculate_avm(df, selected_blk, sel_stack_raw, sel_floor)
+                                
+                                if area:
+                                    # --- V21 新特性：估值区间图表 ---
+                                    # 计算区间
+                                    val_low = value * 0.9
+                                    val_high = value * 1.1
+                                    
+                                    # 1. 核心指标卡片
+                                    m1, m2, m3 = st.columns(3)
+                                    m1.metric("📐 单元面积", f"{int(area):,} sqft")
+                                    premium_txt = f"{premium_rate*100:.1f}%"
+                                    delta_c = "normal" if floor_diff > 0 else "inverse"
+                                    m2.metric(f"📊 估算 PSF (溢价率: {premium_txt})", f"${int(est_psf):,} psf", f"{floor_diff:+.0f} 层 (对比均值)", delta_color=delta_c)
+                                    m3.metric("💰 银行估值 (Est. Value)", f"${value/1e6:.2f}M")
+
+                                    st.write("") # Spacer
+
+                                    # 2. 估值区间可视化 (Price Range Bar)
+                                    fig_range = go.Figure()
+
+                                    # 绘制背景条 (灰色)
+                                    fig_range.add_trace(go.Scatter(
+                                        x=[val_low, val_high], y=[0, 0],
+                                        mode='lines',
+                                        line=dict(color='lightgrey', width=10),
+                                        showlegend=False,
+                                        hoverinfo='skip'
+                                    ))
+                                    
+                                    # 绘制 Lower / Upper 标记
+                                    fig_range.add_trace(go.Scatter(
+                                        x=[val_low, val_high], y=[0, 0],
+                                        mode='markers+text',
+                                        marker=dict(color=['#E74C3C', '#2ECC71'], size=15),
+                                        text=[f"${val_low/1e6:.2f}M<br>(-10%)", f"${val_high/1e6:.2f}M<br>(+10%)"],
+                                        textposition="bottom center",
+                                        showlegend=False,
+                                        hoverinfo='skip'
+                                    ))
+
+                                    # 绘制中心点 (Target Value)
+                                    fig_range.add_trace(go.Scatter(
+                                        x=[value], y=[0],
+                                        mode='markers+text',
+                                        marker=dict(color='black', size=20, symbol='diamond'),
+                                        text=[f"<b>${value/1e6:.2f}M</b><br>(Est. Value)"],
+                                        textposition="top center",
+                                        showlegend=False,
+                                        hoverinfo='x'
+                                    ))
+
+                                    fig_range.update_layout(
+                                        title=dict(text="📈 估值区间 (Price Range)", x=0.5),
+                                        xaxis=dict(
+                                            title="总价 ($)", 
+                                            range=[val_low * 0.95, val_high * 1.05],
+                                            showgrid=False, zeroline=False
+                                        ),
+                                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.5, 0.5]),
+                                        height=200, margin=dict(l=20, r=20, t=50, b=20),
+                                        plot_bgcolor='white'
+                                    )
+                                    st.plotly_chart(fig_range, use_container_width=True)
+                                    
+                                    # 3. 辅助信息 (历史 + Comps)
+                                    c_info1, c_info2 = st.columns(2)
+                                    with c_info1:
+                                        st.write("##### 📜 该单元历史交易")
+                                        history = df[(df['BLK'] == selected_blk) & (df['Stack'] == sel_stack_raw) & (df['Floor_Num'] == sel_floor)].copy()
+                                        if not history.empty:
+                                            history['Sale Date'] = history['Sale Date'].dt.date
+                                            st.dataframe(history[['Sale Date', 'Sale Price', 'Sale PSF']].sort_values('Sale Date', ascending=False), hide_index=True)
+                                        else:
+                                            st.info("暂无历史交易记录")
+                                    
+                                    with c_info2:
+                                        st.write(f"##### ⚖️ 估值参考 ({len(comps_df)} 笔相似成交)")
+                                        if not comps_df.empty:
+                                            st.dataframe(comps_df[['Sale Date', 'BLK', 'Stack', 'Floor', 'Sale PSF', 'Sale Price']], use_container_width=True, hide_index=True)
+                                        else:
+                                            st.warning("数据量不足，无法找到相似对标。")
+                                else:
+                                    st.error("无法获取该单元的面积数据，无法估值。")
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+                else:
+                    st.warning(f"Block {selected_blk} 没有有效的楼层数据。")
+        else:
+            st.warning("CSV 缺少 BLK 列")
+
+    # --- Tab 3: 详细成交记录 ---
+    with tab3:
+        st.subheader("📝 详细成交记录")
+        st.dataframe(
+            df.sort_values('Sale Date', ascending=False), 
+            use_container_width=True,
+            column_config={
+                "Sale Date": st.column_config.DateColumn("成交日期"),
+                "Sale Price": st.column_config.NumberColumn("成交价 ($)", format="$%.0f"),
+                "Sale PSF": st.column_config.NumberColumn("尺价 ($psf)", format="$%.0f"),
+            }
+        )
+
+else:
+    st.info("👈 请在左侧选择项目或上传 CSV 文件。")
