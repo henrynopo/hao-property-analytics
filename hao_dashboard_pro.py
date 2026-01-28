@@ -67,12 +67,41 @@ def load_data(file_or_url):
         return None
 
 def auto_categorize(df, method):
-    """智能户型分类"""
-    if method == "按楼座 (Block)": 
+    """智能户型分类 (V8: 完美支持 Bedroom Type)"""
+    
+    # 1. 优先处理卧室类型 (当用户选择或自动检测到时)
+    if method == "按卧室数量 (Bedroom Type)":
+        # 能够识别的常见列名列表
+        target_cols = ['Bedroom Type', 'Bedroom_Type', 'Bedrooms', 'No. of Bedrooms', 'Type']
+        found_col = None
+        
+        # 精确查找
+        for col in df.columns:
+            if col.strip() in target_cols:
+                found_col = col
+                break
+        
+        # 模糊查找 (如果上面没找到)
+        if not found_col:
+            for col in df.columns:
+                if 'Bedroom' in col:
+                    found_col = col
+                    break
+        
+        if found_col:
+            # 清洗数据：转成字符串，去除空格，统一大写
+            # 效果: "3br " -> "3BR", "3 br" -> "3BR"
+            clean_series = df[found_col].astype(str).str.strip().str.upper()
+            # 可选：如果您想把 '3BR' 显示为 '3 Bedroom'，可以在这里加 .replace
+            return clean_series
+        else:
+            return pd.Series(["未找到卧室列"] * len(df))
+
+    # 2. 按楼座
+    elif method == "按楼座 (Block)": 
         return df['BLK']
-    elif method == "按卧室类型 (如果数据有)":
-        cols = [c for c in df.columns if 'Bedroom' in c or 'Type' in c]
-        return df[cols[0]].astype(str) if cols else pd.Series(["未知"] * len(df))
+
+    # 3. 默认：按面积分箱 (仅作为备选)
     else: 
         def size_bin(area):
             if area < 800: return "Small (<800sf)"
@@ -178,7 +207,27 @@ with st.sidebar:
     st.markdown("---")
     st.header("2. 统计设定")
 
-    category_method = st.selectbox("分类依据", ["按户型面积段 (自动分箱)", "按楼座 (Block)", "按卧室类型"])
+# ... (在 st.header("2. 统计设定") 下方) ...
+
+    # === 智能判断默认分类方式 ===
+    default_index = 0
+    # 检查数据里有没有卧室列
+    has_bedroom_col = False
+    if df is not None:
+        possible_cols = ['Bedroom Type', 'Bedrooms', 'Type', 'Bedroom_Type']
+        # 只要列名里包含 Bedroom 或者是上面的词，就认为是包含卧室数据
+        if any(c in df.columns for c in possible_cols) or any('Bedroom' in c for c in df.columns):
+            has_bedroom_col = True
+            default_index = 0 # 将 "按卧室数量" 设为默认
+
+    # 调整选项顺序，根据是否有卧室列动态变化
+    if has_bedroom_col:
+        options = ["按卧室数量 (Bedroom Type)", "按楼座 (Block)", "按户型面积段 (自动分箱)"]
+    else:
+        options = ["按户型面积段 (自动分箱)", "按楼座 (Block)", "按卧室数量 (Bedroom Type)"]
+
+    category_method = st.selectbox("分类依据", options, index=0)
+    
     inventory_mode = st.radio("库存计算模式", ["🤖 自动推定 (智能补全)", "🖐 手动输入"], index=0)
     inventory_container = st.container()
 
@@ -322,9 +371,9 @@ if df is not None:
 
     st.divider()
 
-    # 5.3 楼宇透视 (Tower View)
+# 5.3 楼宇透视 (Tower View) - V9 新加坡专属版
     st.subheader("🏢 楼宇透视 (Tower View)")
-    st.caption("X轴=Stack(单元), Y轴=Floor(楼层)。灰色=理论存在但未交易(库存), 彩色=历史交易")
+    st.caption("视觉指南：🟦 颜色越深=尺价越高 | ⬜ 浅灰=库存死筹")
     
     if 'BLK' in df.columns:
         blk_counts = df['BLK'].value_counts()
@@ -333,88 +382,153 @@ if df is not None:
         if selected_blk:
             blk_df = df[df['BLK'] == selected_blk].copy()
             
-            # --- 可视化数据准备 ---
+            # --- 1. 计算库存骨架 ---
             cat_this = blk_df['Category'].iloc[0]
             cat_df_all = df[df['Category'] == cat_this]
             
-            # 1. 寻找基准层数
+            # 基准层数 (同类最高)
             std_units_cat = cat_df_all[~cat_df_all['Is_Special']]
             max_cat_floor = std_units_cat['Floor_Num'].max() if not std_units_cat.empty else 1
             
-            # 2. 本地标准层
+            # 本地层数
             std_units_local = blk_df[~blk_df['Is_Special']]
             local_floors = set(std_units_local['Floor_Num'].unique())
             
-            # 3. 智能补全
+            # 智能补全逻辑
             final_floors_set = local_floors.copy()
-            if (len(local_floors) > 0) and (max(local_floors) < max_cat_floor - 2):
-                all_cat_floors = set(std_units_cat['Floor_Num'].unique())
-                final_floors_set = all_cat_floors
             
+            # 只有当本地层数明显缺失时才补全
+            if (len(local_floors) > 0) and (max(local_floors) < max_cat_floor - 2):
+                 all_cat_floors = set(std_units_cat['Floor_Num'].unique())
+                 final_floors_set = all_cat_floors
+
+            # --- 2. 构建精准的 Y 轴 (关键修改) ---
+            # 收集所有需要绘制的楼层，并排序
             all_stacks = sorted(blk_df['Stack'].unique()) if 'Stack' in blk_df.columns else ['Unknown']
             
-            grid_data = []
-            for stack in all_stacks:
-                ph_floors = blk_df[(blk_df['Stack'] == stack) & (blk_df['Is_Special'])]['Floor_Num'].unique()
-                theoretical_floors = final_floors_set.union(set(ph_floors))
-                
-                for floor in theoretical_floors:
-                    match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
-                    if not match.empty:
-                        latest = match.sort_values('Sale Date', ascending=False).iloc[0]
-                        grid_data.append({
-                            'Stack': stack, 'Floor': floor, 'Status': 'Sold',
-                            'PSF': int(latest['Sale PSF']), 'Date': latest['Sale Date'].strftime('%Y-%m')
-                        })
-                    else:
-                        grid_data.append({
-                            'Stack': stack, 'Floor': floor, 'Status': 'Stock',
-                            'PSF': 0, 'Date': '-'
-                        })
+            # 初始楼层集合
+            floors_to_plot = final_floors_set.copy()
             
+            # 加上特殊的 Penthouse 楼层
+            ph_floors = blk_df[blk_df['Is_Special']]['Floor_Num'].unique()
+            for f in ph_floors:
+                floors_to_plot.add(f)
+            
+            # 排序：转成整数排序，再转成字符串供分类轴使用
+            sorted_floors_num = sorted(list(floors_to_plot))
+            
+            # 过滤掉 <= 0 的楼层 (以防万一数据有误)
+            sorted_floors_num = [f for f in sorted_floors_num if f > 0]
+            
+            # 构造 Y 轴标签 (保留数字格式用于画图，但轴设置为 Category)
+            
+            # --- 3. 填充数据网格 ---
+            grid_data = []
+            
+            for stack in all_stacks:
+                # 每个 Stack 的理论楼层
+                this_stack_ph = blk_df[(blk_df['Stack'] == stack) & (blk_df['Is_Special'])]['Floor_Num'].unique()
+                stack_theoretical = final_floors_set.union(set(this_stack_ph))
+                
+                for floor in sorted_floors_num:
+                    # 只有当这个楼层属于这个 Stack 的理论范围时，才画格子
+                    # (这能解决复式楼的跳层显示问题)
+                    if floor in stack_theoretical:
+                        match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
+                        
+                        if not match.empty:
+                            latest = match.sort_values('Sale Date', ascending=False).iloc[0]
+                            grid_data.append({
+                                'Stack': str(stack),
+                                'Floor': str(int(floor)), # 转字符串，强制分类
+                                'Floor_Int': int(floor),  # 留个数字用于排序
+                                'Type': 'Sold',
+                                'PSF': int(latest['Sale PSF']),
+                                'Price': f"${latest['Sale Price']/1e6:.2f}M",
+                                'Year': latest['Sale Year']
+                            })
+                        else:
+                            grid_data.append({
+                                'Stack': str(stack),
+                                'Floor': str(int(floor)),
+                                'Floor_Int': int(floor),
+                                'Type': 'Stock',
+                                'PSF': None,
+                                'Price': '-',
+                                'Year': '-'
+                            })
+
             viz_df = pd.DataFrame(grid_data)
             
             if not viz_df.empty:
                 fig_tower = go.Figure()
-                
-                # 库存层
-                df_stock = viz_df[viz_df['Status'] == 'Stock']
-                fig_tower.add_trace(go.Scatter(
-                    x=df_stock['Stack'], y=df_stock['Floor'], mode='markers',
-                    marker=dict(symbol='square', size=18, color='lightgrey', line=dict(width=1, color='grey')),
-                    name='库存 (未售)', hoverinfo='text',
-                    text=[f"Stack {s} #{f}<br>库存" for s, f in zip(df_stock['Stack'], df_stock['Floor'])]
+
+                # 为了保证 Y 轴顺序正确 (从低到高)，我们需要自定义 Category Order
+                y_category_order = [str(f) for f in sorted_floors_num]
+
+                # 层1：库存背景 (灰色)
+                fig_tower.add_trace(go.Heatmap(
+                    x=viz_df['Stack'],
+                    y=viz_df['Floor'],
+                    z=[1] * len(viz_df),
+                    colorscale=[[0, '#eeeeee'], [1, '#eeeeee']],
+                    showscale=False,
+                    xgap=2, ygap=2, # 加大间距，方格感更强
+                    hoverinfo='skip'
                 ))
-                
-                # 交易层
-                df_sold = viz_df[viz_df['Status'] == 'Sold']
-                fig_tower.add_trace(go.Scatter(
-                    x=df_sold['Stack'], y=df_sold['Floor'], mode='markers',
-                    marker=dict(
-                        symbol='square', size=18, color=df_sold['PSF'], colorscale='RdBu_r',
-                        colorbar=dict(title="最新 PSF"), line=dict(width=1, color='black')
-                    ),
-                    name='已售', hoverinfo='text',
-                    text=[f"Stack {s} #{f}<br>${p} psf<br>{d}" for s, f, p, d in zip(df_sold['Stack'], df_sold['Floor'], df_sold['PSF'], df_sold['Date'])]
-                ))
-                
+
+                # 层2：成交数据
+                sold_df = viz_df[viz_df['Type'] == 'Sold']
+                if not sold_df.empty:
+                    fig_tower.add_trace(go.Heatmap(
+                        x=sold_df['Stack'],
+                        y=sold_df['Floor'],
+                        z=sold_df['PSF'],
+                        colorscale='Teal',
+                        colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
+                        xgap=2, ygap=2,
+                        hovertemplate=
+                        "<b>Stack %{x} - #%{y}</b><br>" +
+                        "💰 PSF: $%{z}<br>" +
+                        "🏷️ 总价: %{customdata[0]}<br>" +
+                        "📅 年份: %{customdata[1]}<extra></extra>",
+                        customdata=sold_df[['Price', 'Year']]
+                    ))
+
+                # --- 4. 布局优化 (关键修改) ---
                 fig_tower.update_layout(
-                    title=f"Block {selected_blk} 库存透视 (补全后)",
-                    xaxis=dict(title="Stack", type='category'),
-                    yaxis=dict(title="Floor", dtick=1),
-                    height=600, width=800, plot_bgcolor='white'
+                    title=dict(text=f"Block {selected_blk} - 楼宇库存透视", x=0.5),
+                    
+                    xaxis=dict(
+                        title="Stack (单元号)",
+                        type='category', # 强制分类轴
+                        side='bottom'
+                    ),
+                    
+                    yaxis=dict(
+                        title="Floor (楼层)",
+                        type='category', # ❌ 关键：不再是 Linear，而是 Category
+                        categoryorder='array', # ❗ 强制指定排序，防止 "10" 排在 "2" 前面
+                        categoryarray=y_category_order, 
+                        dtick=1
+                    ),
+                    
+                    plot_bgcolor='white',
+                    height=max(500, len(y_category_order) * 30), # 动态高度：楼层越多图越高
+                    width=min(1000, 100 * len(all_stacks) + 200),
+                    margin=dict(l=50, r=50, t=60, b=50)
                 )
+
                 st.plotly_chart(fig_tower, use_container_width=True, config={
                     'toImageButtonOptions': {'format': 'png', 'height': exp_height, 'width': exp_width, 'scale': exp_scale}
                 })
                 
-                sold_count = len(df_sold)
+                # 面板
+                sold_count = len(sold_df)
                 total_count = len(viz_df)
-                st.info(f"📊 面板数据：总推算 {total_count} 户 | 历史成交 {sold_count} 户 | 覆盖率 {(sold_count/total_count*100):.1f}%")
+                coverage = (sold_count/total_count*100)
+                st.info(f"📊 {selected_blk}栋 看板：推算总户数 {total_count} | 历史成交 {sold_count} | 换手率 {coverage:.1f}%")
             else:
                 st.warning("数据不足，无法生成透视图")
     else:
         st.warning("CSV 缺少 BLK 列，无法显示楼宇透视")
-
-else:
-    st.info("👈 请在左侧选择项目或上传 CSV 文件。")
