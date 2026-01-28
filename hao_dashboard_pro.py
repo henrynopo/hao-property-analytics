@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import calendar
+import re  # <--- 新增：用于正则匹配，实现自然排序
 
 # ==========================================
 # 🔧 1. 配置中心 (项目列表)
@@ -65,6 +66,13 @@ def load_data(file_or_url):
     except Exception as e:
         st.error(f"数据读取错误: {e}")
         return None
+
+def natural_key(text):
+    """
+    🔧 核心修复：自然排序算法 (Natural Sort)
+    将字符串拆分为数字和非数字，实现 'Block 2' < 'Block 10' 的人类逻辑
+    """
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(text))]
 
 def auto_categorize(df, method):
     """智能户型分类"""
@@ -215,7 +223,7 @@ if df is not None:
     df['Category'] = auto_categorize(df, category_method)
     df['Is_Special'] = mark_penthouse(df)
     
-    unique_cats = sorted(df['Category'].unique())
+    unique_cats = sorted(df['Category'].unique(), key=natural_key) # 分类也应用自然排序
     inventory_map = {}
 
     with inventory_container:
@@ -314,13 +322,13 @@ if df is not None:
 
     st.divider()
 
-    # --- 5.3 楼宇透视 (V9: Category Axis) ---
+    # --- 5.3 楼宇透视 (V9: Category Axis & Natural Sort) ---
     st.subheader("🏢 楼宇透视 (Tower View)")
     st.caption("视觉指南：🟦 颜色越深=尺价越高 | ⬜ 浅灰=库存死筹")
     
     if 'BLK' in df.columns:
-        # --- 🔴 关键修复：楼栋排序改为字母顺序，而非热度顺序 ---
-        all_blks = sorted(df['BLK'].unique())
+        # --- 🔴 关键修复：应用自然排序 (Block 2 < Block 10) ---
+        all_blks = sorted(df['BLK'].unique(), key=natural_key)
         selected_blk = st.selectbox("选择楼栋", all_blks)
         
         if selected_blk:
@@ -339,8 +347,8 @@ if df is not None:
                  all_cat_floors = set(std_units_cat['Floor_Num'].unique())
                  final_floors_set = all_cat_floors
 
-            # 准备绘图
-            all_stacks = sorted(blk_df['Stack'].unique()) if 'Stack' in blk_df.columns else ['Unknown']
+            # 准备绘图 (Stack 也应用自然排序)
+            all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
             floors_to_plot = final_floors_set.copy()
             ph_floors = blk_df[blk_df['Is_Special']]['Floor_Num'].unique()
             for f in ph_floors: floors_to_plot.add(f)
