@@ -369,9 +369,9 @@ if df is not None:
 
     st.divider()
 
-    # --- 5.3 楼宇透视 (V14: AVM 交互版) ---
+# 5.3 楼宇透视 (Tower View) - V15 交互修复版
     st.subheader("🏢 楼宇透视 (Tower View)")
-    st.caption("👈 点击下方格内任意单元，查看【AVM 自动估值报告】")
+    st.caption("👈 **操作提示**：请直接点击下方图表中的任意方格，查看估值报告。")
     
     if 'BLK' in df.columns:
         all_blks = sorted(df['BLK'].unique(), key=natural_key)
@@ -383,13 +383,14 @@ if df is not None:
         if selected_blk:
             blk_df = df[df['BLK'] == selected_blk].copy()
             
-            # 构建物理骨架
+            # --- 构建物理骨架 ---
             valid_floors = blk_df.dropna(subset=['Floor_Num'])
             block_floors_set = set(valid_floors['Floor_Num'].unique())
             floors_to_plot = {f for f in block_floors_set if f > 0}
             sorted_floors_num = sorted(list(floors_to_plot))
             all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
             
+            # --- 填充数据 ---
             grid_data = []
             for stack in all_stacks:
                 for floor in sorted_floors_num:
@@ -438,22 +439,42 @@ if df is not None:
                     plot_bgcolor='white',
                     height=max(400, len(y_category_order) * 35), width=min(1000, 100 * len(all_stacks) + 200),
                     margin=dict(l=50, r=50, t=60, b=50),
-                    clickmode='event+select' # 允许点击
+                    clickmode='event+select', # 关键设置
+                    dragmode='select' # 鼠标默认模式改为选择
                 )
                 
-                # --- 🟢 核心交互：捕捉点击事件 ---
-                event = st.plotly_chart(fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", config={
-                    'toImageButtonOptions': {'format': 'png', 'height': exp_height, 'width': exp_width, 'scale': exp_scale}
-                })
+                # --- 🟢 核心交互修复 ---
+                # 1. 增加 key 参数，防止刷新丢失
+                # 2. 这里的 selection_mode="points" 意味着点击单个点也被视为 select
+                event = st.plotly_chart(
+                    fig_tower, 
+                    use_container_width=True, 
+                    on_select="rerun", 
+                    selection_mode="points", 
+                    key=f"chart_{selected_blk}", # 给每个楼栋一个唯一的 key
+                    config={'toImageButtonOptions': {'format': 'png', 'height': exp_height, 'width': exp_width, 'scale': exp_scale}}
+                )
+                
+                # 调试用：如果点击没反应，取消下面这行的注释，看看 event 输出了什么
+                # st.write(event) 
                 
                 # --- 🟢 AVM 估值报告生成 ---
-                if event and event['selection']['points']:
-                    point = event['selection']['points'][0]
-                    sel_stack = str(point['x'])
-                    sel_floor = int(point['y'])
+                # 检查 event 是否包含 selection 数据
+                if event and "selection" in event and event["selection"]["points"]:
+                    point = event["selection"]["points"][0]
                     
+                    # 尝试从 point 数据中提取 Stack 和 Floor
+                    # Plotly 返回的 x 和 y 可能是索引，也可能是值，取决于轴类型
+                    try:
+                        sel_stack = str(point['x'])
+                        sel_floor = int(point['y'])
+                    except:
+                        # 备用方案：如果 y 轴返回的是 label (比如 "02")
+                        sel_stack = str(point['x'])
+                        sel_floor = int(point['y']) if isinstance(point['y'], int) else int(float(point['y']))
+
                     st.divider()
-                    st.markdown(f"### 💎 AVM 智能估值报告: {selected_blk}-{sel_floor}-{sel_stack}")
+                    st.markdown(f"### 💎 AVM 智能估值报告: {selected_blk} - Stack {sel_stack} - #{sel_floor:02d}")
                     
                     # 运行估值模型
                     area, mkt_psf, value, comps_df = calculate_avm(df, selected_blk, sel_stack, sel_floor)
@@ -461,7 +482,7 @@ if df is not None:
                     if area:
                         c1, c2, c3 = st.columns(3)
                         c1.metric("📐 单元面积", f"{int(area):,} sqft")
-                        c2.metric("📊 市场指导 PSF (同类均价)", f"${int(mkt_psf):,} psf")
+                        c2.metric("📊 市场指导 PSF", f"${int(mkt_psf):,} psf")
                         c3.metric("💰 银行估值 (Est. Value)", f"${value/1e6:.2f}M")
                         
                         # 展示该单元历史
@@ -485,6 +506,3 @@ if df is not None:
                 st.warning(f"Block {selected_blk} 没有有效的楼层数据。")
     else:
         st.warning("CSV 缺少 BLK 列，无法显示楼宇透视")
-
-else:
-    st.info("👈 请在左侧选择项目或上传 CSV 文件。")
