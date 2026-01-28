@@ -136,47 +136,84 @@ def auto_categorize(df, method):
 
 def estimate_inventory(df, category_col='Category'):
     """
-    V2 升级版库存推定算法：基于同楼栋最大历史成交密度
-    解决 Maisonette 跳层编号导致的库存高估问题
+    V4 终极库存算法 (Tower View Mode)
+    逻辑：构建 Block 级标准楼层骨架 + Penthouse 独立判定
     """
-    # 1. 基础检查
-    if 'BLK' not in df.columns:
-        return {}
-    
-    # 确保 Stack 存在，如果没有 Stack 列，尝试从 Unit_ID 或其他方式无法推定，只能退回手动
-    if 'Stack' not in df.columns:
+    if 'BLK' not in df.columns or 'Floor' not in df.columns:
         return {}
 
-    # 2. 计算每个 Stack 的"历史可见容量" (Observed Capacity)
-    # 逻辑：统计每个 Block-Stack 组合下，有多少个唯一的单位被交易过
-    # 注意：这里用 Unit_ID (BLK-Stack-Floor) 去重，或者直接根据 Floor 去重
-    if 'Floor' in df.columns:
-        # 统计每个 stack 卖过多少个不同的楼层
-        stack_counts = df.groupby([category_col, 'BLK', 'Stack'])['Floor'].nunique().reset_index(name='Observed_Count')
-    else:
-        # 如果没有 Floor 列，按行数估算（不太准，但比没有好）
-        stack_counts = df.groupby([category_col, 'BLK', 'Stack']).size().reset_index(name='Observed_Count')
-
-    # 3. 寻找每栋楼的"标准容量" (Block Capacity)
-    # 假设：同一栋楼里，所有 Stack 的高度应该是一样的。
-    # 我们取该栋楼里所有 Stack 中，Observed_Count 最大的那个值，作为该楼的标准层数。
-    # (这能有效解决某些 Stack 交易少导致被低估的问题)
-    block_max_density = stack_counts.groupby([category_col, 'BLK'])['Observed_Count'].max().reset_index(name='Max_Stack_Capacity')
-
-    # 4. 统计每栋楼有多少个 Stack
-    # 逻辑：看历史上该 Block 出现过多少个不同的 Stack 编号
-    block_stack_counts = stack_counts.groupby([category_col, 'BLK'])['Stack'].nunique().reset_index(name='Num_Stacks')
-
-    # 5. 合并计算
-    block_estimates = pd.merge(block_max_density, block_stack_counts, on=[category_col, 'BLK'])
+    # 1. 预处理
+    # 清洗楼层为数字
+    df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
+    df = df.dropna(subset=['Floor_Num'])
     
-    # 单栋楼库存 = Stack数量 * 标准Stack容量
-    block_estimates['Est_Block_Inv'] = block_estimates['Num_Stacks'] * block_estimates['Max_Stack_Capacity']
+    # 2. 识别 Penthouse (异常大户型)
+    # 计算每个分类的中位数面积
+    median_sizes = df.groupby(category_col)['Area (sqft)'].median()
     
-    # 6. 按户型分类汇总
-    final_estimates = block_estimates.groupby(category_col)['Est_Block_Inv'].sum().to_dict()
+    def is_penthouse(row):
+        # 如果面积超过该类中位数的 1.3 倍，且位于高层(>4楼，避免低层的大户型误判)，视为 Penthouse
+        # 对于低层项目，只看面积
+        threshold = median_sizes.get(row[category_col], 2000) * 1.3
+        is_high = row['Floor_Num'] > 4 
+        return (row['Area (sqft)'] > threshold) and is_high
+
+    df['Is_PH'] = df.apply(is_penthouse, axis=1)
+
+    # 3. 构建每栋楼的"标准骨架" (Standard Skeleton)
+    # 标准楼层 = 该 Block 内出现过的、非 PH 的所有楼层集合
+    standard_units = df[~df['Is_PH']]
+    block_skeleton = standard_units.groupby([category_col, 'BLK'])['Floor_Num'].unique().apply(set).reset_index(name='Std_Floors')
+
+    # 4. 计算库存
+    # 库存 = (Stack数量 * 标准骨架层数) + (该 Stack 实际出现过的 PH 数量)
     
-    return final_estimates
+    inventory_map = {}
+    
+    # 遍历每一个分类
+    for cat in df[category_col].unique():
+        cat_inv = 0
+        cat_df = df[df[category_col] == cat]
+        
+        # 遍历该分类下的每一栋楼
+        for blk in cat_df['BLK'].unique():
+            blk_df = cat_df[cat_df['BLK'] == blk]
+            
+            # A. 基础库存 (Standard Inventory)
+            # 获取这栋楼的标准楼层集合
+            skeleton_row = block_skeleton[(block_skeleton[category_col] == cat) & (block_skeleton['BLK'] == blk)]
+            if not skeleton_row.empty:
+                std_floors = skeleton_row.iloc[0]['Std_Floors']
+                # 过滤掉偶尔出现的奇怪楼层 (比如 #01 在高层里)，只保留主流楼层
+                # 简单起见，我们信任数据，直接用集合大小
+                num_std_floors = len(std_floors)
+            else:
+                num_std_floors = 0
+            
+            # 获取这栋楼有多少个 Stack
+            if 'Stack' in blk_df.columns:
+                num_stacks = blk_df['Stack'].nunique()
+            else:
+                num_stacks = 1 # 降级处理
+            
+            base_inv = num_stacks * num_std_floors
+            
+            # B. 特殊库存 (Penthouse Inventory)
+            # 只有当某个 Stack 真的卖过 PH，才给它加 1
+            ph_df = blk_df[blk_df['Is_PH']]
+            if 'Stack' in ph_df.columns:
+                # 统计有多少个唯一的 (Stack, Floor) 组合是 PH
+                # 比如 Stack 02 在 25楼卖过 PH，算 1
+                ph_inv = ph_df.groupby(['Stack', 'Floor_Num']).ngroups
+            else:
+                ph_inv = len(ph_df)
+            
+            # 累加
+            cat_inv += (base_inv + ph_inv)
+            
+        inventory_map[cat] = int(cat_inv)
+            
+    return inventory_map
 
 # --- 4. 主程序逻辑 ---
 
