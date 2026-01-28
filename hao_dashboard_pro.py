@@ -216,15 +216,25 @@ if df is not None:
             for i, cat in enumerate(unique_cats):
                 est_val = int(estimated_inv.get(cat, 100))
                 with cols[i % 2]:
-                    val = st.number_input(f"[{cat}] 库存", value=est_val, min_value=1, key=f"inv_{i}")
+                    # 关键修改：key 中加入 category_method，确保切换分类时强制刷新
+                    val = st.number_input(
+                        f"[{cat}] 库存", 
+                        value=est_val, 
+                        min_value=1, 
+                        key=f"inv_{category_method}_{i}"  # <--- 改了这里
+                    )
                     inventory_map[cat] = val
         else:
-            if inventory_mode == "🤖 自动推定..." and 'Stack' not in df.columns:
-                st.warning("数据缺少 Stack 列，无法自动推定，请手动输入。")
+            # ... (手动模式同理) ...
             cols = st.columns(2)
             for i, cat in enumerate(unique_cats):
                 with cols[i % 2]:
-                    val = st.number_input(f"[{cat}]", value=100, min_value=1, key=f"inv_{i}")
+                    val = st.number_input(
+                        f"[{cat}]", 
+                        value=100, 
+                        min_value=1, 
+                        key=f"inv_manual_{category_method}_{i}" # <--- 改了这里
+                    )
                     inventory_map[cat] = val
 
     total_project_inventory = sum(inventory_map.values())
