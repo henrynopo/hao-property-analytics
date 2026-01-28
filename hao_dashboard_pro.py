@@ -115,63 +115,110 @@ def mark_penthouse(df):
     return df.apply(check, axis=1)
 
 def estimate_inventory(df, category_col='Category'):
-    """V7 智能库存算法 (Category Fallback)"""
+    """
+    V10 智能库存算法 (Stack-Centric / 去重版)
+    核心逻辑：
+    1. 以 "Stack" 为物理实体计算库存 (物理上房子只有这么多)。
+    2. 判定每个 Stack 的"主营户型" (Dominant Category)。
+    3. 将 Stack 的库存仅归入其主营户型，彻底杜绝双重统计。
+    """
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
         return {}
+    
+    # 如果没有 Stack 列，回退到旧逻辑（无法精确去重）
+    if 'Stack' not in df.columns:
+        return _estimate_inventory_legacy(df, category_col)
 
     df = df.dropna(subset=['Floor_Num']).copy()
     
-    # 1. 计算基准层数
-    cat_benchmark_floors = {}
-    for cat in df[category_col].unique():
-        cat_df = df[df[category_col] == cat]
-        std_df = cat_df[~cat_df['Is_Special']] 
-        max_floor = std_df['Floor_Num'].max() if not std_df.empty else 1
-        cat_benchmark_floors[cat] = max_floor
-
-    block_inventory_map = {} 
-    category_total_map = {}
-
-    # 2. 逐栋计算
-    for cat in df[category_col].unique():
-        cat_df = df[df[category_col] == cat]
-        cat_total_inv = 0
-        benchmark_floor = cat_benchmark_floors.get(cat, 1)
+    # --- 第一步：计算每栋楼的"物理高度" (Block Height) ---
+    # 我们假设同一栋楼的所有 Stack 高度应该一致 (取该楼出现过的最高层)
+    # 这一步是为了给那些交易很少的 Stack 补全层数
+    block_max_floors = df.groupby('BLK')['Floor_Num'].max().to_dict()
+    
+    # --- 第二步：遍历每个物理 Stack，计算库存并分配归属 ---
+    # 数据结构: {(BLK, Stack): {'Inventory': 25, 'Category': '3BR'}}
+    stack_inventory_map = {}
+    
+    # 获取所有唯一的 Stack
+    # 我们需要一个临时表来辅助
+    unique_stacks = df[['BLK', 'Stack']].drop_duplicates()
+    
+    for _, row in unique_stacks.iterrows():
+        blk = row['BLK']
+        stack = row['Stack']
         
-        for blk in cat_df['BLK'].unique():
-            blk_df = cat_df[cat_df['BLK'] == blk]
+        # 1. 计算这个 Stack 的物理库存
+        # 逻辑：取"本Stack最高层" 和 "本楼最高层" 的较大值 (保守补全)
+        # 如果本楼最高层是 25，哪怕本 Stack 只卖过 5 楼，也认为它有 25 户
+        
+        # 获取该 Stack 的实际数据
+        stack_df = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
+        
+        # 本 Stack 实际最高
+        if not stack_df.empty:
+            stack_max = stack_df['Floor_Num'].max()
+        else:
+            stack_max = 0
             
-            num_stacks = blk_df['Stack'].nunique() if 'Stack' in blk_df.columns else 1
-            std_units = blk_df[~blk_df['Is_Special']]
-            local_max = std_units['Floor_Num'].max() if not std_units.empty else 0
-            
-            final_floors_count = len(std_units['Floor_Num'].unique()) 
-            
-            # 智能补全
-            if local_max < (benchmark_floor - 2):
-                best_blk_floors = 0
-                for b_temp in cat_df['BLK'].unique():
-                    f_set = set(cat_df[(cat_df['BLK']==b_temp) & (~cat_df['Is_Special'])]['Floor_Num'].unique())
-                    if len(f_set) > best_blk_floors:
-                        best_blk_floors = len(f_set)
-                final_floors_count = best_blk_floors
-            
-            base_inv = num_stacks * final_floors_count
-            
-            ph_inv = 0
-            if 'Stack' in blk_df.columns:
-                ph_inv = blk_df[blk_df['Is_Special']].groupby(['Stack', 'Floor_Num']).ngroups
+        # 本楼最高 (Benchmark)
+        blk_benchmark = block_max_floors.get(blk, 0)
+        
+        # 最终推算层数 (取大值，确保不漏算)
+        # 注意：对于复式楼(Maisonette)，这种 max 逻辑可能偏大(比如只有2,4,6层)，
+        # 但鉴于之前的 Tower View 修复，我们可以更精细，但为了总数对齐，先用 Max 统一逻辑
+        # 更精准做法：计算该 Block 的 "Unique Floors Count"
+        
+        # --- 修正：针对复式楼的精准计数 ---
+        # 不用 Max，而是用"该楼栋出现过的所有楼层集合"的大小
+        blk_floors_set = set(df[df['BLK'] == blk]['Floor_Num'].unique())
+        final_count = len(blk_floors_set)
+        
+        # 2. 判定该 Stack 的归属分类 (Dominant Category)
+        # 统计该 Stack 历史上卖得最多的分类是什么
+        if not stack_df.empty:
+            top_cat = stack_df[category_col].mode()
+            if not top_cat.empty:
+                dominant_cat = top_cat[0]
             else:
-                ph_inv = len(blk_df[blk_df['Is_Special']])
+                dominant_cat = "Unknown"
+        else:
+            dominant_cat = "Unknown"
             
-            total_blk_inv = int(base_inv + ph_inv)
-            block_inventory_map[blk] = total_blk_inv
-            cat_total_inv += total_blk_inv
+        stack_inventory_map[(blk, stack)] = {
+            'count': final_count,
+            'category': dominant_cat
+        }
 
-        category_total_map[cat] = int(cat_total_inv)
+    # --- 第三步：按分类汇总 ---
+    category_totals = {}
+    
+    # 先把所有分类的坑填上 0
+    for cat in df[category_col].unique():
+        category_totals[cat] = 0
+        
+    for info in stack_inventory_map.values():
+        cat = info['category']
+        count = info['count']
+        
+        if cat in category_totals:
+            category_totals[cat] += count
+        else:
+            # 处理可能的 Unknown 或新分类
+            category_totals[cat] = category_totals.get(cat, 0) + count
             
-    st.session_state['block_inv_debug'] = block_inventory_map
-    return category_total_map
+    # 调试信息
+    st.session_state['block_inv_debug'] = {f"{k[0]}-{k[1]}": v['count'] for k, v in stack_inventory_map.items()}
+    
+    return category_totals
+
+def _estimate_inventory_legacy(df, category_col):
+    """旧版逻辑：仅当没有 Stack 列时使用 (由 V7 简化而来)"""
+    inv_map = {}
+    for cat in df[category_col].unique():
+        count = len(df[df[category_col] == cat]) # 极其粗略，仅作兜底
+        inv_map[cat] = count
+    return inv_map
 
 # ==========================================
 # 🎨 4. 侧边栏与主界面逻辑
