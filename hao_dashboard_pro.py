@@ -201,6 +201,10 @@ def calculate_avm(df, blk, stack, floor):
     market_psf = comps['Sale PSF'].median()
     valuation = subject_area * market_psf
     comps_display = comps.sort_values('Sale Date', ascending=False).head(5)
+    
+    # --- 🟢 修复日期格式 (只保留日期) ---
+    comps_display['Sale Date'] = comps_display['Sale Date'].dt.date
+    
     comps_display = comps_display[['Sale Date', 'BLK', 'Stack', 'Floor', 'Area (sqft)', 'Sale PSF', 'Sale Price']]
     
     return subject_area, market_psf, valuation, comps_display
@@ -353,7 +357,7 @@ if df is not None:
 
     st.divider()
 
-    # --- 5.3 楼宇透视 (V17: 双重保险版) ---
+# 5.3 楼宇透视 (Tower View) - V18 格式美化版
     st.subheader("🏢 楼宇透视 (Tower View)")
     st.caption("👈 **操作指南**：直接点击图表方格，或者在下方下拉菜单中选择单元，查看估值报告。")
     
@@ -379,7 +383,11 @@ if df is not None:
             for stack in all_stacks:
                 for floor in sorted_floors_num:
                     match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
-                    unit_label = f"Stack {stack} - #{int(floor):02d}"
+                    
+                    # --- 🟢 格式修复：#Floor-Stack (例如 #03-12) ---
+                    # floor:02d 保证楼层是个位数时前面补0
+                    unit_label = f"#{int(floor):02d}-{stack}"
+                    
                     if not match.empty:
                         latest = match.sort_values('Sale Date', ascending=False).iloc[0]
                         grid_data.append({
@@ -419,6 +427,7 @@ if df is not None:
                         colorscale='Teal', colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
                         xgap=2, ygap=2,
                         hovertemplate="<b>%{customdata[2]}</b><br>💰 PSF: $%{z}<br>🏷️ 总价: %{customdata[3]}<br>📅 年份: %{customdata[4]}<extra></extra>",
+                        # 注意：Label 在 index 2
                         customdata=sold_df[['Stack', 'Raw_Floor', 'Label', 'Price', 'Year']]
                     ))
 
@@ -429,7 +438,6 @@ if df is not None:
                     plot_bgcolor='white',
                     height=max(400, len(y_category_order) * 35), width=min(1000, 100 * len(all_stacks) + 200),
                     margin=dict(l=50, r=50, t=60, b=50),
-                    # V17 优化：移除 dragmode='select'，改回默认，兼容性更好
                     clickmode='event+select'
                 )
                 
@@ -438,12 +446,11 @@ if df is not None:
                     use_container_width=True, 
                     on_select="rerun", 
                     selection_mode="points", 
-                    key=f"chart_v17_{selected_blk}", 
+                    key=f"chart_v18_{selected_blk}", 
                     config={'toImageButtonOptions': {'format': 'png', 'height': exp_height, 'width': exp_width, 'scale': exp_scale}}
                 )
                 
-                # --- 🛡️ 兜底方案：手动选择器 (Manual Selector) ---
-                # 如果图表点击没反应，用户可以在这里直接选
+                # --- 🛡️ 兜底方案：手动选择器 ---
                 st.markdown("---")
                 c_sel1, c_sel2 = st.columns([1, 3])
                 
@@ -452,11 +459,9 @@ if df is not None:
                     st.caption("如果无法点击图表，请在此处手动选择：")
                 
                 with c_sel2:
-                    # 准备选项列表 (Stack - Floor)
-                    # 默认选中：如果是点击触发的，就自动选那个；否则选列表第一个
                     unit_options = sorted(viz_df['Label'].unique(), key=natural_key)
-                    
                     default_idx = 0
+                    
                     # 尝试解析图表点击事件
                     click_stack, click_floor = None, None
                     if event and "selection" in event and event["selection"]["points"]:
@@ -464,13 +469,13 @@ if df is not None:
                         if "customdata" in point:
                             click_stack = str(point["customdata"][0])
                             click_floor = int(point["customdata"][1])
-                            click_label = f"Stack {click_stack} - #{click_floor:02d}"
+                            # 🟢 格式修复：匹配新的 #Floor-Stack 格式
+                            click_label = f"#{click_floor:02d}-{click_stack}"
                             if click_label in unit_options:
                                 default_idx = unit_options.index(click_label)
                     
-                    # 渲染下拉菜单
                     selected_unit_label = st.selectbox(
-                        "选择要估值的单元 (Stack - Floor):", 
+                        "选择要估值的单元:", 
                         unit_options, 
                         index=default_idx,
                         key=f"manual_sel_{selected_blk}"
@@ -478,17 +483,17 @@ if df is not None:
 
                 # --- 统一执行估值逻辑 ---
                 if selected_unit_label:
-                    # 解析 Stack 和 Floor
-                    # 格式 "Stack 10 - #05" -> stack="10", floor=5
                     try:
-                        # 正则提取
-                        parts = re.search(r"Stack (.+) - #(\d+)", selected_unit_label)
+                        # 🟢 格式解析修复：解析 #05-12 这种格式
+                        # 逻辑：#(\d+) 匹配楼层，-(.*) 匹配 Stack
+                        parts = re.search(r"#(\d+)-(.*)", selected_unit_label)
+                        
                         if parts:
-                            sel_stack = parts.group(1)
-                            sel_floor = int(parts.group(2))
+                            sel_floor = int(parts.group(1))
+                            sel_stack = parts.group(2)
                             
                             st.divider()
-                            st.markdown(f"### 💎 AVM 智能估值报告: {selected_blk} - {selected_unit_label}")
+                            st.markdown(f"### 💎 AVM 智能估值报告: {selected_blk} {selected_unit_label}")
                             
                             # 运行估值模型
                             area, mkt_psf, value, comps_df = calculate_avm(df, selected_blk, sel_stack, sel_floor)
@@ -500,8 +505,10 @@ if df is not None:
                                 c3.metric("💰 银行估值 (Est. Value)", f"${value/1e6:.2f}M")
                                 
                                 st.write("##### 📜 该单元历史交易")
-                                history = df[(df['BLK'] == selected_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)]
+                                history = df[(df['BLK'] == selected_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)].copy()
                                 if not history.empty:
+                                    # 🟢 日期格式修复
+                                    history['Sale Date'] = history['Sale Date'].dt.date
                                     st.dataframe(history[['Sale Date', 'Sale Price', 'Sale PSF', 'Area (sqft)']].sort_values('Sale Date', ascending=False), hide_index=True)
                                 else:
                                     st.info("该单元历史上暂无交易记录 (New/Stock)")
@@ -520,6 +527,3 @@ if df is not None:
                 st.warning(f"Block {selected_blk} 没有有效的楼层数据。")
     else:
         st.warning("CSV 缺少 BLK 列，无法显示楼宇透视")
-
-else:
-    st.info("👈 请在左侧选择项目或上传 CSV 文件。")
