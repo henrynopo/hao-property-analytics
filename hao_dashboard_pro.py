@@ -16,8 +16,7 @@ try:
 except:
     PROJECTS = {
         "📂 手动上传 CSV": None,
-        # 在这里填入您的 Google Drive 直链 (https://drive.google.com/uc?id=...)
-        # "🏢 Braddell View": "...", 
+        # "🏢 Braddell View": "https://drive.google.com/uc?id=...", 
     }
 
 # ==========================================
@@ -35,7 +34,6 @@ def load_data(file_or_url):
     try:
         if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
         try:
-            # 智能跳过 Disclaimer
             df_temp = pd.read_csv(file_or_url, header=None, nrows=20)
             header_row = -1
             for i, row in df_temp.iterrows():
@@ -50,18 +48,15 @@ def load_data(file_or_url):
             df = pd.read_csv(file_or_url)
 
         df.columns = df.columns.str.strip()
-        # 清洗数值
         for col in ['Sale Price', 'Sale PSF', 'Area (sqft)']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace(r'[$,]', '', regex=True)
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # 清洗日期
         if 'Sale Date' in df.columns:
             df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
 
-        # 清洗字符串
         if 'BLK' in df.columns: df['BLK'] = df['BLK'].astype(str).str.strip()
         if 'Stack' in df.columns: df['Stack'] = df['Stack'].astype(str).str.strip()
         if 'Floor' in df.columns: df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
@@ -72,8 +67,7 @@ def load_data(file_or_url):
         return None
 
 def auto_categorize(df, method):
-    """智能户型分类 (V8: 优先 Bedroom Type)"""
-    # 1. 优先处理卧室类型
+    """智能户型分类"""
     if method == "按卧室数量 (Bedroom Type)":
         target_cols = ['Bedroom Type', 'Bedroom_Type', 'Bedrooms', 'No. of Bedrooms', 'Type']
         found_col = None
@@ -89,12 +83,8 @@ def auto_categorize(df, method):
             return df[found_col].astype(str).str.strip().str.upper()
         else:
             return pd.Series(["未找到卧室列"] * len(df))
-
-    # 2. 按楼座
     elif method == "按楼座 (Block)": 
         return df['BLK']
-
-    # 3. 按面积
     else: 
         def size_bin(area):
             if area < 800: return "Small (<800sf)"
@@ -117,71 +107,42 @@ def mark_penthouse(df):
 def estimate_inventory(df, category_col='Category'):
     """
     V10 智能库存算法 (Stack-Centric / 去重版)
-    核心逻辑：
-    1. 以 "Stack" 为物理实体计算库存 (物理上房子只有这么多)。
-    2. 判定每个 Stack 的"主营户型" (Dominant Category)。
-    3. 将 Stack 的库存仅归入其主营户型，彻底杜绝双重统计。
     """
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
         return {}
     
-    # 如果没有 Stack 列，回退到旧逻辑（无法精确去重）
+    # 兜底旧逻辑
     if 'Stack' not in df.columns:
-        return _estimate_inventory_legacy(df, category_col)
+        inv_map = {}
+        for cat in df[category_col].unique():
+            inv_map[cat] = len(df[df[category_col] == cat])
+        return inv_map
 
     df = df.dropna(subset=['Floor_Num']).copy()
     
-    # --- 第一步：计算每栋楼的"物理高度" (Block Height) ---
-    # 我们假设同一栋楼的所有 Stack 高度应该一致 (取该楼出现过的最高层)
-    # 这一步是为了给那些交易很少的 Stack 补全层数
+    # 1. 计算每栋楼的物理高度 (Block Height)
     block_max_floors = df.groupby('BLK')['Floor_Num'].max().to_dict()
     
-    # --- 第二步：遍历每个物理 Stack，计算库存并分配归属 ---
-    # 数据结构: {(BLK, Stack): {'Inventory': 25, 'Category': '3BR'}}
+    # 2. 遍历每个物理 Stack
     stack_inventory_map = {}
-    
-    # 获取所有唯一的 Stack
-    # 我们需要一个临时表来辅助
     unique_stacks = df[['BLK', 'Stack']].drop_duplicates()
     
     for _, row in unique_stacks.iterrows():
         blk = row['BLK']
         stack = row['Stack']
         
-        # 1. 计算这个 Stack 的物理库存
-        # 逻辑：取"本Stack最高层" 和 "本楼最高层" 的较大值 (保守补全)
-        # 如果本楼最高层是 25，哪怕本 Stack 只卖过 5 楼，也认为它有 25 户
-        
-        # 获取该 Stack 的实际数据
+        # 计算物理库存 (取 Stack 自身与 Block 基准的较大值)
         stack_df = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
         
-        # 本 Stack 实际最高
-        if not stack_df.empty:
-            stack_max = stack_df['Floor_Num'].max()
-        else:
-            stack_max = 0
-            
-        # 本楼最高 (Benchmark)
-        blk_benchmark = block_max_floors.get(blk, 0)
-        
-        # 最终推算层数 (取大值，确保不漏算)
-        # 注意：对于复式楼(Maisonette)，这种 max 逻辑可能偏大(比如只有2,4,6层)，
-        # 但鉴于之前的 Tower View 修复，我们可以更精细，但为了总数对齐，先用 Max 统一逻辑
-        # 更精准做法：计算该 Block 的 "Unique Floors Count"
-        
-        # --- 修正：针对复式楼的精准计数 ---
-        # 不用 Max，而是用"该楼栋出现过的所有楼层集合"的大小
+        # 针对复式楼优化：使用 Unique Floors Count 而不是 Max
+        # 获取该 Block 所有出现过的楼层数作为基准
         blk_floors_set = set(df[df['BLK'] == blk]['Floor_Num'].unique())
         final_count = len(blk_floors_set)
         
-        # 2. 判定该 Stack 的归属分类 (Dominant Category)
-        # 统计该 Stack 历史上卖得最多的分类是什么
+        # 判定归属分类 (Dominant Category)
         if not stack_df.empty:
             top_cat = stack_df[category_col].mode()
-            if not top_cat.empty:
-                dominant_cat = top_cat[0]
-            else:
-                dominant_cat = "Unknown"
+            dominant_cat = top_cat[0] if not top_cat.empty else "Unknown"
         else:
             dominant_cat = "Unknown"
             
@@ -190,35 +151,18 @@ def estimate_inventory(df, category_col='Category'):
             'category': dominant_cat
         }
 
-    # --- 第三步：按分类汇总 ---
+    # 3. 汇总
     category_totals = {}
-    
-    # 先把所有分类的坑填上 0
     for cat in df[category_col].unique():
         category_totals[cat] = 0
         
     for info in stack_inventory_map.values():
         cat = info['category']
         count = info['count']
-        
-        if cat in category_totals:
-            category_totals[cat] += count
-        else:
-            # 处理可能的 Unknown 或新分类
-            category_totals[cat] = category_totals.get(cat, 0) + count
+        category_totals[cat] = category_totals.get(cat, 0) + count
             
-    # 调试信息
     st.session_state['block_inv_debug'] = {f"{k[0]}-{k[1]}": v['count'] for k, v in stack_inventory_map.items()}
-    
     return category_totals
-
-def _estimate_inventory_legacy(df, category_col):
-    """旧版逻辑：仅当没有 Stack 列时使用 (由 V7 简化而来)"""
-    inv_map = {}
-    for cat in df[category_col].unique():
-        count = len(df[df[category_col] == cat]) # 极其粗略，仅作兜底
-        inv_map[cat] = count
-    return inv_map
 
 # ==========================================
 # 🎨 4. 侧边栏与主界面逻辑
@@ -242,28 +186,26 @@ with st.sidebar:
     st.markdown("---")
     st.header("2. 统计设定")
 
-    # === 初始化 df (关键修复 NameError 的地方) ===
+    # 初始化 df
     df = None
     if selected_project == "📂 手动上传 CSV":
         if uploaded_file: df = load_data(uploaded_file)
     elif sheet_url:
         df = load_data(sheet_url)
 
-    # === 智能默认分类 ===
-    default_cat_idx = 0
+    # 智能默认分类
+    default_idx = 0
     if df is not None:
         possible_cols = ['Bedroom Type', 'Bedrooms', 'Type', 'Bedroom_Type']
         if any(c in df.columns for c in possible_cols) or any('Bedroom' in c for c in df.columns):
-            default_cat_idx = 0 # 优先选卧室
             cat_options = ["按卧室数量 (Bedroom Type)", "按楼座 (Block)", "按户型面积段 (自动分箱)"]
         else:
-            default_cat_idx = 0 # 优先选面积
             cat_options = ["按户型面积段 (自动分箱)", "按楼座 (Block)", "按卧室数量 (Bedroom Type)"]
     else:
         cat_options = ["按户型面积段 (自动分箱)", "按楼座 (Block)", "按卧室数量 (Bedroom Type)"]
 
     category_method = st.selectbox("分类依据", cat_options, index=0)
-    inventory_mode = st.radio("库存计算模式", ["🤖 自动推定 (智能补全)", "🖐 手动输入"], index=0)
+    inventory_mode = st.radio("库存计算模式", ["🤖 自动推定 (V10去重版)", "🖐 手动输入"], index=0)
     
     inventory_container = st.container()
 
@@ -272,7 +214,6 @@ with st.sidebar:
     chart_font_size = st.number_input("图表字号", value=16, min_value=10)
     chart_color = st.color_picker("主色调", "#F63366")
     
-    st.caption("📷 图片下载尺寸")
     exp_width = st.number_input("宽度 (px)", value=1200, step=100)
     exp_height = st.number_input("高度 (px)", value=675, step=100)
     exp_scale = st.slider("清晰度", 1, 5, 2)
@@ -282,7 +223,7 @@ with st.sidebar:
 # ==========================================
 
 if df is not None:
-    # 4.1 预处理流程
+    # 4.1 预处理
     df['Category'] = auto_categorize(df, category_method)
     df['Is_Special'] = mark_penthouse(df)
     
@@ -290,13 +231,15 @@ if df is not None:
     inventory_map = {}
 
     with inventory_container:
-        # 库存配置 (修复了 key 不刷新导致数字不更新的 Bug)
-        if inventory_mode == "🤖 自动推定 (智能补全)" and 'Stack' in df.columns and 'Floor_Num' in df.columns:
-            st.info("已启用 V7 智能库存算法")
+        if inventory_mode == "🤖 自动推定 (V10去重版)" and 'Stack' in df.columns and 'Floor_Num' in df.columns:
+            st.info("已启用 V10 智能库存算法 (Stack去重)")
             estimated_inv = estimate_inventory(df, 'Category')
             cols = st.columns(2)
             for i, cat in enumerate(unique_cats):
                 est_val = int(estimated_inv.get(cat, 100))
+                # --- 🔴 关键修复：防止 ValueBelowMinError ---
+                if est_val < 1: est_val = 1 
+                
                 with cols[i % 2]:
                     val = st.number_input(f"[{cat}]", value=est_val, min_value=1, key=f"inv_{category_method}_{i}")
                     inventory_map[cat] = val
@@ -312,18 +255,11 @@ if df is not None:
     total_project_inventory = sum(inventory_map.values())
     
     # 🕵️‍♀️ 库存审计
-    if inventory_mode == "🤖 自动推定 (智能补全)" and 'block_inv_debug' in st.session_state:
-        with st.expander(f"🕵️‍♀️ 查看每栋楼的具体推定数据 (Debug) - 总计: {total_project_inventory}户"):
+    if inventory_mode == "🤖 自动推定 (V10去重版)" and 'block_inv_debug' in st.session_state:
+        with st.expander(f"🕵️‍♀️ 查看 Stack 级推定明细 (Debug) - 总计: {total_project_inventory}户"):
             debug_map = st.session_state['block_inv_debug']
-            debug_df = pd.DataFrame(list(debug_map.items()), columns=['Block', 'Est. Inventory'])
-            if 'BLK' in df.columns:
-                actual_vol = df['BLK'].value_counts().reset_index()
-                actual_vol.columns = ['Block', 'Sold Volume']
-                audit_df = pd.merge(debug_df, actual_vol, on='Block', how='left').fillna(0)
-                audit_df['Sold Volume'] = audit_df['Sold Volume'].astype(int)
-                audit_df['Coverage %'] = (audit_df['Sold Volume'] / audit_df['Est. Inventory'] * 100)
-                st.dataframe(audit_df.sort_values('Block'), use_container_width=True, 
-                             column_config={"Coverage %": st.column_config.ProgressColumn("已售占比", format="%.1f%%", min_value=0, max_value=100)})
+            debug_df = pd.DataFrame(list(debug_map.items()), columns=['Stack_ID', 'Est. Inventory'])
+            st.dataframe(debug_df, use_container_width=True)
 
     # --- 5.1 KPI ---
     st.title(f"🏙️ {project_name} 市场透视")
@@ -393,7 +329,7 @@ if df is not None:
 
     st.divider()
 
-    # --- 5.3 楼宇透视 (V9: Category Axis & No Gaps) ---
+    # --- 5.3 楼宇透视 (V9: Category Axis) ---
     st.subheader("🏢 楼宇透视 (Tower View)")
     st.caption("视觉指南：🟦 颜色越深=尺价越高 | ⬜ 浅灰=库存死筹")
     
@@ -417,7 +353,7 @@ if df is not None:
                  all_cat_floors = set(std_units_cat['Floor_Num'].unique())
                  final_floors_set = all_cat_floors
 
-            # 准备绘图数据
+            # 准备绘图
             all_stacks = sorted(blk_df['Stack'].unique()) if 'Stack' in blk_df.columns else ['Unknown']
             floors_to_plot = final_floors_set.copy()
             ph_floors = blk_df[blk_df['Is_Special']]['Floor_Num'].unique()
