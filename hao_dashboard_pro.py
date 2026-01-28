@@ -369,7 +369,7 @@ if df is not None:
 
     st.divider()
 
-# 5.3 楼宇透视 (Tower View) - V16 交互逻辑修复版
+# 5.3 楼宇透视 (Tower View) - V16 Debug版
     st.subheader("🏢 楼宇透视 (Tower View)")
     st.caption("👈 **操作提示**：请直接点击下方图表中的任意方格，查看估值报告。")
     
@@ -474,10 +474,13 @@ if df is not None:
                     config={'toImageButtonOptions': {'format': 'png', 'height': exp_height, 'width': exp_width, 'scale': exp_scale}}
                 )
                 
-                # --- 调试器 (如果点不出，展开这个看) ---
+                # --- 🐞 调试器：如果不显示 AVM，请展开这个看 ---
                 with st.expander("🐞 点击数据调试器 (Debug Info)"):
-                    st.write("Streamlit 收到的点击事件数据：")
-                    st.json(event)
+                    if event:
+                        st.write("Streamlit 接收到的事件数据：")
+                        st.json(event)
+                    else:
+                        st.write("等待点击...")
 
                 # --- AVM 逻辑 ---
                 if event and "selection" in event and event["selection"]["points"]:
