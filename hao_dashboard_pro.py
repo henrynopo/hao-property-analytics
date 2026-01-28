@@ -1,205 +1,282 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 
-# --- 页面配置：设置为宽屏模式，适合看大图 ---
-st.set_page_config(page_title="HAO数据中台", layout="wide", page_icon="🏢")
+# --- 1. 页面基础配置 ---
+st.set_page_config(page_title="HAO数据罗盘 Pro", layout="wide", page_icon="🧭")
 
-# --- 侧边栏：控制中心 ---
+# --- 2. 侧边栏：超级控制台 ---
 with st.sidebar:
-    st.title("🎛️ 报告控制台")
+    st.header("1. 数据源与项目")
     
-    # 1. 数据源选择 (支持手动上传或自动连接)
-    data_source = st.radio("数据来源", ["📂 手动上传 CSV", "☁️ 自动读取 Google Sheets"])
+    # 2.1 数据源
+    data_source = st.radio("数据来源", ["📂 手动上传 CSV", "☁️ 自动读取 Google Sheets (示例)"])
+    
+    # 2.2 项目名称逻辑
+    project_name_input = st.text_input("项目名称 (用于标题)", value="")
     
     uploaded_file = None
     if data_source == "📂 手动上传 CSV":
-        uploaded_file = st.file_uploader("拖入最新的交易记录", type=['csv'])
+        uploaded_file = st.file_uploader("拖入交易记录 CSV", type=['csv'])
+        # 自动获取文件名作为项目名
+        if uploaded_file is not None and project_name_input == "":
+            default_name = uploaded_file.name.replace(".csv", "")
+            st.caption(f"已自动识别文件名: {default_name}")
+            # 这里如果不手动赋值，就在主逻辑里用 default_name
     else:
-        # 这里填入您的 Google Sheet CSV 导出链接
-        # 实际使用时，您可以配置 secrets 里的链接
-        sheet_url = st.text_input("输入 Google Sheets CSV 链接", 
-                                  value="https://docs.google.com/spreadsheets/d/e/YOUR_SHEET_ID/pub?output=csv")
-    
-    st.markdown("---")
-    
-    # 2. 库存配置 (关键参数)
-    st.header("🏗️ 项目库存设定")
-    col1, col2 = st.columns(2)
-    with col1:
-        inv_high = st.number_input("高层总户数", value=768)
-        inv_low = st.number_input("低层总户数", value=72)
-    with col2:
-        inv_maison = st.number_input("复式总户数", value=60)
-        inv_shop = st.number_input("商铺/其他", value=10)
-    
-    total_inventory_map = {
-        "High-Rise": inv_high, "Low-Rise": inv_low, 
-        "Maisonette": inv_maison, "Other": inv_shop
-    }
+        sheet_url = st.text_input("Google Sheets CSV 链接")
 
     st.markdown("---")
-    
-    # 3. 报告定制 (用于做 Flyer/PPT)
-    st.header("🎨 图表定制 (Export)")
-    chart_color = st.color_picker("主色调 (品牌色)", "#F63366")
-    chart_template = st.selectbox("图表风格", ["plotly_white", "ggplot2", "seaborn"])
-    download_format = st.radio("下载格式", ["高清图片 (PNG)", "交互式网页 (HTML)"])
+    st.header("2. 统计维度设定")
 
-# --- 数据处理函数 ---
-@st.cache_data(ttl=600) # 缓存10分钟，避免频繁读取
-# --- 数据处理函数 (智能修复版) ---
+    # 2.3 分类逻辑 (解决问题 6)
+    # 既然CSV可能没有卧室数，我们提供三种分类方式
+    category_method = st.selectbox(
+        "选择统计分类方式",
+        ["按户型面积段 (自动分箱)", "按楼座 (Block)", "按卧室类型 (如果有列)"]
+    )
+    
+    st.info("👇 请在数据加载后，在下方配置各分类的总库存，以计算准确换手率。")
+    
+    # 库存配置容器 (稍后填充)
+    inventory_container = st.container()
+
+    st.markdown("---")
+    st.header("3. 报告导出设置")
+    chart_font_size = st.slider("图表字体大小", 10, 30, 16)
+    chart_color = st.color_picker("图表主色调", "#F63366")
+
+# --- 3. 核心功能函数 ---
+
 @st.cache_data(ttl=600)
-def load_data(source_type, file_or_url):
+def load_data(file_or_url):
     try:
-        # 1. 初步读取
-        if source_type == "📂 手动上传 CSV":
-            if file_or_url is None: return None
-            # 手动上传的文件对象需要重置指针，防止读取空文件
-            file_or_url.seek(0)
-            df = pd.read_csv(file_or_url)
-        else:
-            df = pd.read_csv(file_or_url)
-            
-        # 2. 智能寻找表头 (关键修复步骤!)
-        # 如果第一列里没有 'BLK' 也没有 'Sale Date'，说明读到了 Disclaimer
-        # 我们往下找 10 行，看看哪一行才是真的表头
-        if 'Sale Date' not in df.columns and 'BLK' not in df.columns:
-            # 重新读取前20行，不带表头
-            if source_type == "📂 手动上传 CSV":
-                file_or_url.seek(0)
-            
-            # 临时读一下，找 Header 行号
+        # 智能跳过 Disclaimer 逻辑 (保留之前的修复)
+        if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
+        
+        # 先读前几行判断 Header
+        try:
             df_temp = pd.read_csv(file_or_url, header=None, nrows=20)
-            
-            # 遍历寻找包含 "Sale Date" 或 "BLK" 的行
-            header_row_index = -1
+            header_row = -1
             for i, row in df_temp.iterrows():
                 row_str = row.astype(str).str.cat(sep=',')
                 if "Sale Date" in row_str or "BLK" in row_str:
-                    header_row_index = i
+                    header_row = i
                     break
             
-            # 如果找到了真正的表头行，重新读取
-            if header_row_index != -1:
-                if source_type == "📂 手动上传 CSV":
-                    file_or_url.seek(0)
-                df = pd.read_csv(file_or_url, header=header_row_index)
-        
-        # 3. 再次确认列名 (去除空格，防止 ' Sale Price' 这种错误)
+            if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
+            df = pd.read_csv(file_or_url, header=header_row if header_row != -1 else 0)
+        except:
+            if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
+            df = pd.read_csv(file_or_url)
+
+        # 清洗列名
         df.columns = df.columns.str.strip()
         
-        # 4. 数据清洗 (保持不变)
+        # 清洗数值和日期
         if 'Sale Price' in df.columns:
-             df['Sale Price'] = df['Sale Price'].astype(str).str.replace(r'[$,]', '', regex=True)
-             df['Sale Price'] = pd.to_numeric(df['Sale Price'], errors='coerce')
-             
+             df['Sale Price'] = df['Sale Price'].astype(str).str.replace(r'[$,]', '', regex=True).astype(float)
         if 'Sale PSF' in df.columns:
-             df['Sale PSF'] = df['Sale PSF'].astype(str).str.replace(r'[$,]', '', regex=True)
-             df['Sale PSF'] = pd.to_numeric(df['Sale PSF'], errors='coerce')
-             
+             df['Sale PSF'] = df['Sale PSF'].astype(str).str.replace(r'[$,]', '', regex=True).astype(float)
         if 'Area (sqft)' in df.columns:
-             df['Area (sqft)'] = df['Area (sqft)'].astype(str).str.replace(r'[,]', '', regex=True)
-             df['Area (sqft)'] = pd.to_numeric(df['Area (sqft)'], errors='coerce')
-             
+             df['Area (sqft)'] = df['Area (sqft)'].astype(str).str.replace(r'[,]', '', regex=True).astype(float)
         if 'Sale Date' in df.columns:
             df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
 
-        # 5. 最终检查：如果还是没有 Sale Year，那就是文件格式太奇怪了
-        if 'Sale Year' not in df.columns:
-            st.error("错误：无法在文件中找到 'Sale Date' 列。请检查 CSV 文件格式。")
-            return None
-            
         return df
-        
     except Exception as e:
-        st.error(f"数据加载失败: {e}")
         return None
 
-# --- 户型分类逻辑 ---
-def classify_unit(row):
-    # 简单分类逻辑，您可根据实际调整
-    blk = str(row.get('BLK', ''))
-    if any(x in blk for x in ['N','P','Q','R']): return "Low-Rise"
-    if any(x in blk for x in ['J','K','L','M']): return "Maisonette"
-    return "High-Rise"
+def auto_categorize(df, method):
+    """智能分类引擎"""
+    if method == "按楼座 (Block)":
+        return df['BLK'].astype(str)
+    
+    elif method == "按卧室类型 (如果有列)":
+        # 尝试寻找包含 Bedroom 或 Type 的列
+        possible_cols = [c for c in df.columns if 'Bedroom' in c or 'Type' in c]
+        if possible_cols:
+            return df[possible_cols[0]].astype(str)
+        else:
+            return pd.Series(["未知"] * len(df))
+            
+    else: # 默认：按面积段自动分箱 (解决没有卧室数的问题)
+        # 逻辑：<800, 800-1200, 1200-1600, >1600
+        def size_bin(area):
+            if area < 800: return "Small (<800sf)"
+            if area < 1200: return "Medium (800-1.2k)"
+            if area < 1600: return "Large (1.2k-1.6k)"
+            if area < 2500: return "X-Large (1.6k-2.5k)"
+            return "Giant (>2.5k)"
+        return df['Area (sqft)'].apply(size_bin)
 
-# --- 主界面 ---
+# --- 4. 主程序逻辑 ---
 
 # 加载数据
 df = None
-if data_source == "📂 手动上传 CSV":
-    df = load_data(data_source, uploaded_file)
-else:
-    # 这里的 URL 需要替换为您真实的 Google Sheet CSV 链接
-    if st.sidebar.button("刷新数据 (从云端)"):
-        st.cache_data.clear() # 清除缓存，强制刷新
-    df = load_data(data_source, st.session_state.get('sheet_url', ''))
+if uploaded_file:
+    df = load_data(uploaded_file)
+    # 确定项目标题
+    if project_name_input:
+        app_title = project_name_input
+    else:
+        app_title = uploaded_file.name.replace(".csv", "")
 
+elif data_source == "☁️ 自动读取 Google Sheets (示例)" and 'sheet_url' in locals() and sheet_url:
+    df = load_data(sheet_url)
+    app_title = project_name_input if project_name_input else "未命名项目"
+
+# 如果数据加载成功
 if df is not None:
-    # 应用分类
-    if 'Category' not in df.columns:
-        df['Category'] = df.apply(classify_unit, axis=1)
+    # 4.1 应用分类
+    df['Category'] = auto_categorize(df, category_method)
+    
+    # 4.2 动态库存配置 (SideBar)
+    # 找出所有分类
+    unique_cats = sorted(df['Category'].unique())
+    inventory_map = {}
+    
+    with inventory_container:
+        st.caption(f"已识别出 {len(unique_cats)} 种分类。请设置总户数：")
+        # 默认给一个大概的数字，避免除以0
+        cols = st.columns(2)
+        for i, cat in enumerate(unique_cats):
+            # 这里的 Key 必须唯一
+            with cols[i % 2]:
+                val = st.number_input(f"[{cat}] 库存", value=100, min_value=1, key=f"inv_{i}")
+                inventory_map[cat] = val
+    
+    # 计算总库存
+    total_project_inventory = sum(inventory_map.values())
 
-    st.title(f"📊 {df['Sale Year'].max()}年 Braddell View 市场深度分析")
-    st.caption(f"数据更新至: {datetime.now().strftime('%Y-%m-%d %H:%M')} | 总交易记录: {len(df)}")
+    # --- 5. 仪表盘展示区 ---
+    
+    st.title(f"🏙️ {app_title} 数据透视")
+    st.caption(f"数据范围: {df['Sale Date'].min().date()} 至 {df['Sale Date'].max().date()} | 总交易: {len(df)} 宗")
 
-    # === 模块：核心指标卡片 (适合手机看) ===
-    cols = st.columns(4)
-    latest_year = df['Sale Year'].max()
-    latest_df = df[df['Sale Year'] == latest_year]
+    # 5.1 关键指标 (KPI) - 解决问题 2 (当前时间)
+    current_year = datetime.now().year # 获取真实的 2026
     
-    cols[0].metric("今年成交量", f"{len(latest_df)} 宗")
-    cols[1].metric("今年最高价", f"${latest_df['Sale Price'].max()/1e6:.2f}M")
-    cols[2].metric("今年均尺价", f"${latest_df['Sale PSF'].mean():.0f} psf")
-    cols[3].metric("今年换手率 (High-Rise)", f"{len(latest_df[latest_df['Category']=='High-Rise'])/inv_high*100:.1f}%")
+    # 逻辑：如果没有 2026 的数据，KPI 显示 0 是正确的，但为了体验，可以显示 "过去12个月"
+    # 这里我们严格按照 Henry 要求的 "今年 (YTD)"
+    df_this_year = df[df['Sale Year'] == current_year]
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric(f"{current_year}年 成交量", f"{len(df_this_year)} 宗")
+    
+    if len(df_this_year) > 0:
+        avg_price = df_this_year['Sale PSF'].mean()
+        max_price = df_this_year['Sale Price'].max()
+        col2.metric(f"{current_year} 均尺价", f"${avg_price:,.0f} psf")
+        col3.metric(f"{current_year} 最高价", f"${max_price/1e6:.2f}M")
+    else:
+        col2.metric(f"{current_year} 均尺价", "-")
+        col3.metric(f"{current_year} 最高价", "-")
+        
+    # 总体换手率
+    turnover_ytd = (len(df_this_year) / total_project_inventory * 100)
+    col4.metric(f"{current_year} 整体换手率", f"{turnover_ytd:.2f}%")
 
-    # === 模块：定制化图表生成器 (用于报告) ===
-    st.markdown("### 📈 趋势分析 (可下载用于报告)")
+    st.divider()
+
+    # 5.2 超级趋势图 (解决问题 3, 4, 5)
+    st.subheader("📈 价格与成交量走势 (可定制)")
     
-    # 数据准备：年度均价
-    trend_data = df.groupby(['Sale Year', 'Category'])['Sale PSF'].mean().reset_index()
+    col_ctrl1, col_ctrl2 = st.columns([1, 3])
+    with col_ctrl1:
+        # 时间粒度选择
+        freq_map = {"年 (Year)": "Y", "季度 (Quarter)": "Q", "月 (Month)": "M"}
+        freq_sel = st.selectbox("时间粒度", list(freq_map.keys()))
+        freq_code = freq_map[freq_sel]
+        
+        # 时间范围选择
+        min_date = df['Sale Date'].min().date()
+        max_date = df['Sale Date'].max().date()
+        date_range = st.date_input("选择时间范围", [min_date, max_date])
+
+    # 数据重采样 (Resampling)
+    # 过滤时间
+    if len(date_range) == 2:
+        mask = (df['Sale Date'].dt.date >= date_range[0]) & (df['Sale Date'].dt.date <= date_range[1])
+        df_filtered = df.loc[mask]
+    else:
+        df_filtered = df
+
+    # 按选定粒度聚合
+    trend_data = df_filtered.set_index('Sale Date').groupby('Category').resample(freq_code).agg({
+        'Sale PSF': 'mean',
+        'Sale Price': 'count' # 用 Price 的 count 代表成交量
+    }).rename(columns={'Sale Price': 'Volume'}).reset_index()
+
+    # 绘图
+    fig = px.line(
+        trend_data, 
+        x='Sale Date', 
+        y='Sale PSF', 
+        color='Category', 
+        markers=True,
+        title=f"{app_title} 尺价走势 ({freq_sel})",
+        color_discrete_sequence=[chart_color, "#2E86C1", "#28B463", "#D35400"]
+    )
     
-    fig = px.line(trend_data, x='Sale Year', y='Sale PSF', color='Category', 
-                  title="三大户型历史尺价走势 (1995-Present)",
-                  template=chart_template,
-                  color_discrete_sequence=[chart_color, "#00CC96", "#636EFA"]) # 使用自定义颜色
-    
-    # 针对 Flyer 优化的图表布局
-    fig.update_layout(font=dict(size=14), title_font=dict(size=20))
+    # 解决问题 4 & 5: 定制化 Layout
+    fig.update_layout(
+        font=dict(size=chart_font_size), # 字体大小可调
+        legend=dict(
+            orientation="h",  # 水平排列
+            yanchor="bottom",
+            y=1.02,           # 放在图表顶部
+            xanchor="right",
+            x=1,
+            title=None
+        ),
+        hovermode="x unified"
+    )
     
     st.plotly_chart(fig, use_container_width=True)
+    
+    st.info(f"💡 提示：调整左侧侧边栏的“字体大小”，可以改变下载图片的字号。")
 
-    # === 下载中心 ===
-    col_dl1, col_dl2 = st.columns([1, 4])
-    with col_dl1:
-        # 下载 Excel 数据
-        csv = trend_data.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 下载表格数据 (Excel)",
-            data=csv,
-            file_name='trend_data.csv',
-            mime='text/csv',
+    st.divider()
+
+    # 5.3 楼栋/单元分析 (解决问题 7)
+    st.subheader("🏢 楼栋与单元热度 (Block vs Stack)")
+    
+    analysis_dim = st.radio("分析维度", ["按楼栋 (Block)", "按具体单元 (Stack)"], horizontal=True)
+    
+    if analysis_dim == "按楼栋 (Block)":
+        # Block 热度
+        block_stats = df.groupby('BLK').agg({
+            'Sale Price': 'count',
+            'Sale PSF': 'mean'
+        }).reset_index().rename(columns={'Sale Price': 'Volume'})
+        
+        fig_blk = px.bar(
+            block_stats, x='BLK', y='Volume', color='Sale PSF',
+            title="各楼栋历史成交量 (颜色深浅代表均价)",
+            color_continuous_scale="Blues"
         )
-    with col_dl2:
-        st.info("💡 提示：将鼠标移动到图表右上角，点击相机图标 📷 即可直接下载透明背景的高清 PNG 图片用于 Flyer。")
-
-    # === 模块：换手率热力表 (表格模式) ===
-    st.markdown("### 🔥 5年周期换手率 (详细数据)")
-    
-    # 计算逻辑 (复用之前的逻辑)
-    df['Period'] = (df['Sale Year'] // 5 * 5).astype(str) + "s" # 2020s, 2025s
-    period_stats = df.groupby(['Period', 'Category']).size().reset_index(name='Volume')
-    period_stats['Total_Inv'] = period_stats['Category'].map(total_inventory_map)
-    period_stats['Turnover %'] = (period_stats['Volume'] / period_stats['Total_Inv'] * 100).round(1)
-    
-    pivot_table = period_stats.pivot(index='Period', columns='Category', values='Turnover %')
-    
-    # 使用 Pandas Styler 进行着色 (类似 Excel 条件格式)
-    st.dataframe(pivot_table.style.background_gradient(cmap='Reds', axis=None).format("{:.1f}%"), use_container_width=True)
+        st.plotly_chart(fig_blk, use_container_width=True)
+        
+    else:
+        # Stack 热度 (更细致)
+        if 'Stack' in df.columns:
+            stack_stats = df.groupby(['BLK', 'Stack']).size().reset_index(name='Volume')
+            # 组合 BLK-Stack 作为标签
+            stack_stats['Label'] = stack_stats['BLK'].astype(str) + "-" + stack_stats['Stack'].astype(str)
+            
+            fig_stack = px.treemap(
+                stack_stats, path=['BLK', 'Stack'], values='Volume',
+                title="单元热力图 (面积越大代表成交越活跃)",
+                color='Volume', color_continuous_scale="Reds"
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
+        else:
+            st.warning("CSV 文件中找不到 'Stack' 列，无法进行单元分析。")
 
 else:
-    st.info("👋 欢迎回来，Henry。请在左侧上传数据或连接 Google Sheets 开始工作。")
+    st.info("👈 请在左侧上传 CSV 文件开始分析。")
