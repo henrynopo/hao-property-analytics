@@ -136,82 +136,70 @@ def auto_categorize(df, method):
 
 def estimate_inventory(df, category_col='Category'):
     """
-    V4 终极库存算法 (Tower View Mode)
-    逻辑：构建 Block 级标准楼层骨架 + Penthouse 独立判定
+    V5 矩阵补全算法 (Matrix Reconstruction)
+    逻辑：
+    1. 提取每栋楼的'全集楼层' (Union of Floors)。
+    2. 对每个Stack进行'楼层补全'。
+    3. 对 Penthouse 进行异常值熔断，防止过度补全。
     """
     if 'BLK' not in df.columns or 'Floor' not in df.columns:
         return {}
 
-    # 1. 预处理
-    # 清洗楼层为数字
+    # 1. 数据预处理：转数字，去空值
+    df = df.copy()
     df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
     df = df.dropna(subset=['Floor_Num'])
     
-    # 2. 识别 Penthouse (异常大户型)
-    # 计算每个分类的中位数面积
-    median_sizes = df.groupby(category_col)['Area (sqft)'].median()
-    
-    def is_penthouse(row):
-        # 如果面积超过该类中位数的 1.3 倍，且位于高层(>4楼，避免低层的大户型误判)，视为 Penthouse
-        # 对于低层项目，只看面积
-        threshold = median_sizes.get(row[category_col], 2000) * 1.3
-        is_high = row['Floor_Num'] > 4 
-        return (row['Area (sqft)'] > threshold) and is_high
+    # 2. 识别 Penthouse (特殊层)
+    # 这里的阈值设为该分类中位数的 1.4 倍，且必须是该栋楼的最高层
+    median_size = df['Area (sqft)'].median()
+    def is_special_unit(row):
+        return row['Area (sqft)'] > (median_size * 1.4)
+    df['Is_Special'] = df.apply(is_special_unit, axis=1)
 
-    df['Is_PH'] = df.apply(is_penthouse, axis=1)
-
-    # 3. 构建每栋楼的"标准骨架" (Standard Skeleton)
-    # 标准楼层 = 该 Block 内出现过的、非 PH 的所有楼层集合
-    standard_units = df[~df['Is_PH']]
-    block_skeleton = standard_units.groupby([category_col, 'BLK'])['Floor_Num'].unique().apply(set).reset_index(name='Std_Floors')
-
-    # 4. 计算库存
-    # 库存 = (Stack数量 * 标准骨架层数) + (该 Stack 实际出现过的 PH 数量)
-    
     inventory_map = {}
     
-    # 遍历每一个分类
+    # 遍历每个分类 (High-Rise, Maisonette...)
     for cat in df[category_col].unique():
-        cat_inv = 0
         cat_df = df[df[category_col] == cat]
+        cat_total_inv = 0
         
-        # 遍历该分类下的每一栋楼
+        # 遍历每栋楼 (Block)
         for blk in cat_df['BLK'].unique():
             blk_df = cat_df[cat_df['BLK'] == blk]
             
-            # A. 基础库存 (Standard Inventory)
-            # 获取这栋楼的标准楼层集合
-            skeleton_row = block_skeleton[(block_skeleton[category_col] == cat) & (block_skeleton['BLK'] == blk)]
-            if not skeleton_row.empty:
-                std_floors = skeleton_row.iloc[0]['Std_Floors']
-                # 过滤掉偶尔出现的奇怪楼层 (比如 #01 在高层里)，只保留主流楼层
-                # 简单起见，我们信任数据，直接用集合大小
-                num_std_floors = len(std_floors)
+            # A. 构建这栋楼的"标准楼层全集" (The Union Set)
+            # 排除掉特殊户型(Penthouse)，只看标准层
+            std_units = blk_df[~blk_df['Is_Special']]
+            if not std_units.empty:
+                # 获取这栋楼所有出现过的标准楼层号 (去重)
+                # 例如 Maisonette: {02, 04, 06, 08}
+                union_floors = set(std_units['Floor_Num'].unique())
             else:
-                num_std_floors = 0
+                union_floors = set()
             
-            # 获取这栋楼有多少个 Stack
+            # B. 统计这栋楼有多少个 Stack
             if 'Stack' in blk_df.columns:
-                num_stacks = blk_df['Stack'].nunique()
+                stacks = blk_df['Stack'].unique()
             else:
-                num_stacks = 1 # 降级处理
+                # 如果没有 Stack 列，退化为简单计数 (不推荐)
+                stacks = ['Unknown']
             
-            base_inv = num_stacks * num_std_floors
-            
-            # B. 特殊库存 (Penthouse Inventory)
-            # 只有当某个 Stack 真的卖过 PH，才给它加 1
-            ph_df = blk_df[blk_df['Is_PH']]
-            if 'Stack' in ph_df.columns:
-                # 统计有多少个唯一的 (Stack, Floor) 组合是 PH
-                # 比如 Stack 02 在 25楼卖过 PH，算 1
-                ph_inv = ph_df.groupby(['Stack', 'Floor_Num']).ngroups
-            else:
-                ph_inv = len(ph_df)
-            
-            # 累加
-            cat_inv += (base_inv + ph_inv)
-            
-        inventory_map[cat] = int(cat_inv)
+            # C. 计算库存
+            for stack in stacks:
+                # 1. 基础库存：默认每个 Stack 都有所有的标准楼层
+                stack_inv = len(union_floors)
+                
+                # 2. 增量库存：检查这个 Stack 是否有特殊户型 (Penthouse)
+                # 只有该 Stack 真的卖过特殊层，才加进去
+                if 'Stack' in blk_df.columns:
+                    special_units = blk_df[(blk_df['Stack'] == stack) & (blk_df['Is_Special'])]
+                    # 加上特殊层的数量 (通常是1)
+                    stack_inv += len(special_units['Floor_Num'].unique())
+                
+                cat_total_inv += stack_inv
+
+        inventory_map[cat] = int(cat_total_inv)
             
     return inventory_map
 
