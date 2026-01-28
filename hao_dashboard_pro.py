@@ -135,12 +135,48 @@ def auto_categorize(df, method):
         return df['Area (sqft)'].apply(size_bin)
 
 def estimate_inventory(df, category_col='Category'):
-    if 'Floor' not in df.columns: return {}
-    df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce').fillna(1)
-    if 'Stack' in df.columns:
-        stack_stats = df.groupby([category_col, 'BLK', 'Stack'])['Floor_Num'].max().reset_index()
-        return stack_stats.groupby(category_col)['Floor_Num'].sum().to_dict()
-    return {}
+    """
+    V2 升级版库存推定算法：基于同楼栋最大历史成交密度
+    解决 Maisonette 跳层编号导致的库存高估问题
+    """
+    # 1. 基础检查
+    if 'BLK' not in df.columns:
+        return {}
+    
+    # 确保 Stack 存在，如果没有 Stack 列，尝试从 Unit_ID 或其他方式无法推定，只能退回手动
+    if 'Stack' not in df.columns:
+        return {}
+
+    # 2. 计算每个 Stack 的"历史可见容量" (Observed Capacity)
+    # 逻辑：统计每个 Block-Stack 组合下，有多少个唯一的单位被交易过
+    # 注意：这里用 Unit_ID (BLK-Stack-Floor) 去重，或者直接根据 Floor 去重
+    if 'Floor' in df.columns:
+        # 统计每个 stack 卖过多少个不同的楼层
+        stack_counts = df.groupby([category_col, 'BLK', 'Stack'])['Floor'].nunique().reset_index(name='Observed_Count')
+    else:
+        # 如果没有 Floor 列，按行数估算（不太准，但比没有好）
+        stack_counts = df.groupby([category_col, 'BLK', 'Stack']).size().reset_index(name='Observed_Count')
+
+    # 3. 寻找每栋楼的"标准容量" (Block Capacity)
+    # 假设：同一栋楼里，所有 Stack 的高度应该是一样的。
+    # 我们取该栋楼里所有 Stack 中，Observed_Count 最大的那个值，作为该楼的标准层数。
+    # (这能有效解决某些 Stack 交易少导致被低估的问题)
+    block_max_density = stack_counts.groupby([category_col, 'BLK'])['Observed_Count'].max().reset_index(name='Max_Stack_Capacity')
+
+    # 4. 统计每栋楼有多少个 Stack
+    # 逻辑：看历史上该 Block 出现过多少个不同的 Stack 编号
+    block_stack_counts = stack_counts.groupby([category_col, 'BLK'])['Stack'].nunique().reset_index(name='Num_Stacks')
+
+    # 5. 合并计算
+    block_estimates = pd.merge(block_max_density, block_stack_counts, on=[category_col, 'BLK'])
+    
+    # 单栋楼库存 = Stack数量 * 标准Stack容量
+    block_estimates['Est_Block_Inv'] = block_estimates['Num_Stacks'] * block_estimates['Max_Stack_Capacity']
+    
+    # 6. 按户型分类汇总
+    final_estimates = block_estimates.groupby(category_col)['Est_Block_Inv'].sum().to_dict()
+    
+    return final_estimates
 
 # --- 4. 主程序逻辑 ---
 
