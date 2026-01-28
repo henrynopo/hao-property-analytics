@@ -105,13 +105,10 @@ def mark_penthouse(df):
     return df.apply(check, axis=1)
 
 def estimate_inventory(df, category_col='Category'):
-    """
-    V10 智能库存算法 (Stack-Centric / 去重版)
-    """
+    """V10 智能库存算法 (Stack-Centric / 去重版)"""
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
         return {}
     
-    # 兜底旧逻辑
     if 'Stack' not in df.columns:
         inv_map = {}
         for cat in df[category_col].unique():
@@ -120,10 +117,8 @@ def estimate_inventory(df, category_col='Category'):
 
     df = df.dropna(subset=['Floor_Num']).copy()
     
-    # 1. 计算每栋楼的物理高度 (Block Height)
     block_max_floors = df.groupby('BLK')['Floor_Num'].max().to_dict()
     
-    # 2. 遍历每个物理 Stack
     stack_inventory_map = {}
     unique_stacks = df[['BLK', 'Stack']].drop_duplicates()
     
@@ -131,15 +126,11 @@ def estimate_inventory(df, category_col='Category'):
         blk = row['BLK']
         stack = row['Stack']
         
-        # 计算物理库存 (取 Stack 自身与 Block 基准的较大值)
         stack_df = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
         
-        # 针对复式楼优化：使用 Unique Floors Count 而不是 Max
-        # 获取该 Block 所有出现过的楼层数作为基准
         blk_floors_set = set(df[df['BLK'] == blk]['Floor_Num'].unique())
         final_count = len(blk_floors_set)
         
-        # 判定归属分类 (Dominant Category)
         if not stack_df.empty:
             top_cat = stack_df[category_col].mode()
             dominant_cat = top_cat[0] if not top_cat.empty else "Unknown"
@@ -151,7 +142,6 @@ def estimate_inventory(df, category_col='Category'):
             'category': dominant_cat
         }
 
-    # 3. 汇总
     category_totals = {}
     for cat in df[category_col].unique():
         category_totals[cat] = 0
@@ -186,14 +176,12 @@ with st.sidebar:
     st.markdown("---")
     st.header("2. 统计设定")
 
-    # 初始化 df
     df = None
     if selected_project == "📂 手动上传 CSV":
         if uploaded_file: df = load_data(uploaded_file)
     elif sheet_url:
         df = load_data(sheet_url)
 
-    # 智能默认分类
     default_idx = 0
     if df is not None:
         possible_cols = ['Bedroom Type', 'Bedrooms', 'Type', 'Bedroom_Type']
@@ -237,9 +225,7 @@ if df is not None:
             cols = st.columns(2)
             for i, cat in enumerate(unique_cats):
                 est_val = int(estimated_inv.get(cat, 100))
-                # --- 🔴 关键修复：防止 ValueBelowMinError ---
                 if est_val < 1: est_val = 1 
-                
                 with cols[i % 2]:
                     val = st.number_input(f"[{cat}]", value=est_val, min_value=1, key=f"inv_{category_method}_{i}")
                     inventory_map[cat] = val
@@ -254,7 +240,6 @@ if df is not None:
 
     total_project_inventory = sum(inventory_map.values())
     
-    # 🕵️‍♀️ 库存审计
     if inventory_mode == "🤖 自动推定 (V10去重版)" and 'block_inv_debug' in st.session_state:
         with st.expander(f"🕵️‍♀️ 查看 Stack 级推定明细 (Debug) - 总计: {total_project_inventory}户"):
             debug_map = st.session_state['block_inv_debug']
@@ -334,8 +319,9 @@ if df is not None:
     st.caption("视觉指南：🟦 颜色越深=尺价越高 | ⬜ 浅灰=库存死筹")
     
     if 'BLK' in df.columns:
-        blk_counts = df['BLK'].value_counts()
-        selected_blk = st.selectbox("选择楼栋", blk_counts.index.tolist())
+        # --- 🔴 关键修复：楼栋排序改为字母顺序，而非热度顺序 ---
+        all_blks = sorted(df['BLK'].unique())
+        selected_blk = st.selectbox("选择楼栋", all_blks)
         
         if selected_blk:
             blk_df = df[df['BLK'] == selected_blk].copy()
