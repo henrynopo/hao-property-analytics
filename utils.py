@@ -95,86 +95,91 @@ def mark_penthouse(df):
     medians = df.groupby('Category')['Area (sqft)'].median()
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
-# ==================== 3. 业务算法 (V53 强力修正版) ====================
+# ==================== 3. 业务算法 (V54 物理填充版) ====================
 
 def estimate_inventory(df, category_col='Category'):
     # 1. 基础检查
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
         return {}
-    
-    # 🟢 关键点1: 初始化必须基于原始 df，确保 key 绝对存在
-    all_cats = df[category_col].unique()
-    final_totals = {cat: 0 for cat in all_cats}
-    
-    # 如果没有 Stack 列，直接退化为统计出现次数
     if 'Stack' not in df.columns:
-        for cat in all_cats:
-            final_totals[cat] = len(df[df[category_col] == cat])
-        return final_totals
+        # 无 Stack 列时的退化处理
+        inv_map = {}
+        for cat in df[category_col].unique():
+            inv_map[cat] = len(df[df[category_col] == cat])
+        return inv_map
 
-    # 2. 准备清洗后的数据用于推断
-    df_clean = df.dropna(subset=['Floor_Num']).copy()
+    df = df.dropna(subset=['Floor_Num']).copy()
     
-    # 计算基准层高
+    # 2. 计算户型基准高度 (Benchmark Max Floor)
     cat_benchmark_floors = {}
-    for cat in all_cats:
-        cat_df = df_clean[df_clean[category_col] == cat]
-        if 'Is_Special' in df_clean.columns:
-            std_df = cat_df[~cat_df['Is_Special']]
+    for cat in df[category_col].unique():
+        cat_df = df[df[category_col] == cat]
+        if 'Is_Special' in df.columns:
+            std_df = cat_df[~cat_df['Is_Special']] 
         else:
             std_df = cat_df
-        max_floor = std_df['Floor_Num'].max() if not std_df.empty else 1
-        cat_benchmark_floors[cat] = max_floor
-
-    # 3. Stack 推断逻辑
+        # 取该户型的最大楼层作为基准
+        max_floor = std_df['Floor_Num'].max() if not std_df.empty else cat_df['Floor_Num'].max()
+        cat_benchmark_floors[cat] = max_floor if pd.notnull(max_floor) else 1
+    
+    # 3. 逐个 Stack 进行物理填充计算
     stack_inventory_map = {}
-    unique_stacks = df_clean[['BLK', 'Stack']].drop_duplicates()
+    unique_stacks = df[['BLK', 'Stack']].drop_duplicates()
     
     for _, row in unique_stacks.iterrows():
         blk = row['BLK']
         stack = row['Stack']
-        stack_df = df_clean[(df_clean['BLK'] == blk) & (df_clean['Stack'] == stack)]
+        stack_df = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
         
-        local_floors_set = set(stack_df['Floor_Num'].unique())
-        local_max = max(local_floors_set) if local_floors_set else 0
+        # 🟢 V54 核心修复:
+        # 不再计算 len(set)，而是计算 max(floor)
+        # 逻辑：如果 #15 楼存在，则假设 #01-#15 楼都存在（填充缺失数据）
+        local_max = stack_df['Floor_Num'].max() if not stack_df.empty else 0
         
+        # 确定主导户型
         if not stack_df.empty:
             dominant_cat = stack_df[category_col].mode()[0]
         else:
-            continue
+            dominant_cat = "Unknown"
         
         benchmark = cat_benchmark_floors.get(dominant_cat, local_max)
-        if (local_max < benchmark - 2) and (local_max > benchmark * 0.5):
+        
+        # 智能补全:
+        # 如果当前 Stack 最高层(例如13) 接近基准(例如15)，则补全至基准(15)
+        # 否则(例如是低层Block)，保留其实际最高层(13)
+        if (benchmark > 0) and (local_max >= benchmark * 0.7):
              final_count = int(benchmark)
         else:
-             final_count = len(local_floors_set)
+             final_count = int(local_max)
 
-        # 累加到主导户型
-        final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + final_count
+        # 确保至少为1
+        if final_count < 1: final_count = 1
 
-    # 🟢 关键点2: 硬保底逻辑 (Hard Floor)
-    # 计算实际已知的独立单位数 (Distinct Unit IDs)
-    observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
-    
-    for cat in final_totals:
-        estimated = final_totals[cat]
-        observed = observed_counts.get(cat, 0)
-        # 如果推断值小于实际观测值（说明该户型在Stack中是少数派被吞了），强制取观测值
-        if estimated < observed:
-            final_totals[cat] = observed
+        stack_inventory_map[(blk, stack)] = {
+            'count': final_count,
+            'category': dominant_cat
+        }
+
+    # 4. 汇总
+    category_totals = {}
+    # 初始化所有类别
+    for cat in df[category_col].unique():
+        category_totals[cat] = 0
+        
+    for info in stack_inventory_map.values():
+        cat = info['category']
+        count = info['count']
+        category_totals[cat] = category_totals.get(cat, 0) + count
             
-    return final_totals
+    return category_totals
 
 def get_dynamic_floor_premium(df, category):
     cat_df = df[df['Category'] == category].copy()
     if cat_df.empty: return 0.005
-    
     recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
     recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
-    
     grouped = recent_df.groupby(['BLK', 'Stack'])
     rates = []
-    
     for _, group in grouped:
         if len(group) < 2: continue
         recs = group.to_dict('records')
@@ -184,13 +189,10 @@ def get_dynamic_floor_premium(df, category):
                 if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
                 floor_diff = r1['Floor_Num'] - r2['Floor_Num']
                 if floor_diff == 0: continue
-                
                 if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
                 else: high, low, f_delta = r2, r1, -floor_diff
-                
                 rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
                 if -0.005 < rate < 0.03: rates.append(rate)
-
     if len(rates) >= 3:
         fitted_rate = float(np.median(rates))
         return max(0.001, min(0.015, fitted_rate))
