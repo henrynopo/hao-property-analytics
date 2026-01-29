@@ -2,7 +2,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from utils import calculate_avm, calculate_ssd_status, natural_key # 🟢 引入自然排序
+# 🟢 必须确保引入 natural_key 用于排序
+from utils import calculate_avm, calculate_ssd_status, natural_key
 from pdf_gen import generate_pdf_report, PDF_AVAILABLE
 
 def render(df, project_name, chart_font_size):
@@ -22,12 +23,12 @@ def render(df, project_name, chart_font_size):
         st.success(f"已定位到: Block {target_blk} #{target_floor}-{target_stack}")
         del st.session_state['avm_target']
 
-    # ================= 2. 输入栏 (全下拉菜单 + 自然排序) =================
+    # ================= 2. 输入栏 (Block自然排序 + Floor下拉菜单) =================
     c1, c2, c3 = st.columns(3)
     
-    # --- 1. Block 选择 (自然排序) ---
+    # --- 1. Block 选择 (🟢 修复：自然排序) ---
     with c1:
-        # 🟢 核心修正: 使用 natural_key 进行排序
+        # 使用 natural_key 确保 10A, 10B 排序正确
         blks = sorted(df['BLK'].unique(), key=natural_key)
         
         b_idx = 0
@@ -36,17 +37,16 @@ def render(df, project_name, chart_font_size):
             
         s_blk = st.selectbox("1. 选择楼座 (Block)", blks, index=b_idx, key="avm_blk")
     
-    # --- 2. Floor 选择 (下拉菜单) ---
+    # --- 2. Floor 选择 (🟢 修复：强制下拉菜单) ---
     with c2:
-        # 获取该 Block 的数据
         blk_df = df[df['BLK'] == s_blk]
         
-        # 提取有效楼层并排序
+        # 提取有效楼层
         if 'Floor_Num' in blk_df.columns:
-            # unique() 得到数组 -> 转 int -> 排序 -> 转 list
+            # 排序并转为整数列表
             valid_floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
         else:
-            valid_floors = list(range(1, 26)) # 兜底
+            valid_floors = list(range(1, 26))
             
         if not valid_floors: valid_floors = [1]
         
@@ -55,24 +55,22 @@ def render(df, project_name, chart_font_size):
         if target_floor in valid_floors:
             f_idx = valid_floors.index(target_floor)
         else:
-            # 默认选中中间层，体验较好
+            # 默认选中间层
             f_idx = len(valid_floors) // 2
         
-        # 🟢 核心修正: 使用 selectbox 而不是 number_input
+        # 使用 selectbox
         s_floor = st.selectbox("2. 选择楼层 (Floor)", valid_floors, index=f_idx, key="avm_floor")
 
     # --- 3. Stack 选择 (智能筛选 + 自然排序) ---
     with c3:
-        # 只显示该 Block 该 Floor 实际存在的 Stack
+        # 只显示该层存在的 Stack
         relevant_stacks = sorted(blk_df[blk_df['Floor_Num'] == s_floor]['Stack'].unique(), key=natural_key)
         
-        # 如果该层没数据（比如新盘），回退显示该栋楼所有 Stack
         if not relevant_stacks:
             relevant_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
         
         if not relevant_stacks: relevant_stacks = ['Unknown']
         
-        # 默认选中逻辑
         s_idx = 0
         if target_stack in relevant_stacks:
             s_idx = relevant_stacks.index(target_stack)
@@ -115,7 +113,7 @@ def render(df, project_name, chart_font_size):
         m2.metric("预估尺价 (Est. PSF)", f"${val_psf:,.0f} psf")
         m3.metric("单位面积 (Area)", f"{int(area):,} sqft")
         
-        # [Section 2] 估值区间仪表盘 (去红线版)
+        # [Section 2] 估值区间仪表盘 (🟢 修复：深蓝色指针，无红线)
         fig_gauge = go.Figure(go.Indicator(
             mode = "number+gauge",
             value = valuation,
@@ -125,23 +123,24 @@ def render(df, project_name, chart_font_size):
             gauge = {
                 'shape': "bullet",
                 'axis': {'range': [valuation*0.85, valuation*1.15]},
-                'bar': {'color': "#1f77b4"}, # 深蓝色
+                'bar': {'color': "#1f77b4"}, # 深蓝色 (Professional Blue)
                 'steps': [
-                    {'range': [valuation*0.85, valuation*0.95], 'color': "lightgray"},
-                    {'range': [valuation*0.95, valuation*1.05], 'color': "#90EE90"}, 
-                    {'range': [valuation*1.05, valuation*1.15], 'color': "lightgray"}
+                    {'range': [valuation*0.85, valuation*0.95], 'color': "#f0f2f6"}, # 浅灰
+                    {'range': [valuation*0.95, valuation*1.05], 'color': "#90EE90"}, # 绿色安全区
+                    {'range': [valuation*1.05, valuation*1.15], 'color': "#f0f2f6"}  # 浅灰
                 ],
             }
         ))
         fig_gauge.update_layout(height=120, margin=dict(l=20, r=20, t=30, b=20))
         st.plotly_chart(fig_gauge, use_container_width=True)
 
-        # [Section 3] 本单位历史成交 (Unit History)
+        # [Section 3] 本单位历史成交 (🟢 修复：动态列检测，防崩)
         st.subheader("📜 本单位历史成交 (Unit History)")
         if not hist_df.empty:
-            # 智能列检测
-            desired_cols = ['Sale Date', 'Sale Price', 'Sale PSF', 'Type of Sale']
-            final_cols = [c for c in desired_cols if c in hist_df.columns]
+            # 这里的逻辑是：只把 CSV 里存在的列拿出来显示，如果没有 'Type of Sale' 就不拿
+            # 这行代码绝对不会报 KeyError
+            potential_cols = ['Sale Date', 'Sale Price', 'Sale PSF', 'Type of Sale']
+            final_cols = [c for c in potential_cols if c in hist_df.columns]
             
             st.dataframe(
                 hist_df[final_cols].style.format({
@@ -157,14 +156,14 @@ def render(df, project_name, chart_font_size):
         else:
             st.info("ℹ️ 该单位在数据库中暂无历史交易记录。")
 
-        # [Section 4] 周边参考成交 (Comps)
+        # [Section 4] 周边参考成交
         st.subheader("📉 周边参考成交 (Comparables)")
         
-        comps_desired = ['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']
-        comps_final = [c for c in comps_desired if c in comps_df.columns]
+        comps_potential = ['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']
+        comps_cols = [c for c in comps_potential if c in comps_df.columns]
 
         st.dataframe(
-            comps_df[comps_final].style.format({
+            comps_df[comps_cols].style.format({
                 'Sale Price': "${:,.0f}", 'Sale PSF': "${:,.0f}", 'Area (sqft)': "{:,.0f}"
             }),
             use_container_width=True
