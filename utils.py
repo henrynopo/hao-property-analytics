@@ -94,35 +94,41 @@ def mark_penthouse(df):
     medians = df.groupby('Category')['Area (sqft)'].median()
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
-# 🟢 V62 新增: 全局步长检测器 (供 Tab1 和 Tab2 共同使用)
+# 🟢 V63 核心算法: 密度比率检测
 def detect_block_step(blk_df):
     floors = sorted(blk_df['Floor_Num'].dropna().unique())
     if not floors: return 1
     
     min_f, max_f = min(floors), max(floors)
-    height = max_f - min_f
+    physical_height = max_f - min_f + 1
     
-    # 规则1: 如果楼层很矮 (<6层)，强制 Step=1 (保护 10P 这种低层洋房)
-    if height < 6: return 1
+    # 规则 1: 低层保护 (针对 10P)
+    # 如果楼只有不到 6 层高，强制认为是平层。绝大多数复式都在高楼。
+    if max_f < 6: return 1
     
-    # 规则2: 检测间距
-    if len(floors) >= 3:
-        diffs = np.diff(floors)
-        # 如果大部分间距都是 2 (允许少量误差)
-        count_2 = np.sum(diffs == 2)
-        if count_2 > len(diffs) * 0.6: 
+    # 规则 2: 密度比率检测 (针对 10M vs 普通公寓)
+    unique_units_count = blk_df['Unit_ID'].nunique()
+    unique_stacks_count = blk_df['Stack'].nunique()
+    
+    if unique_stacks_count > 0 and physical_height > 0:
+        # 计算：平均每列有多少个单位
+        avg_units_per_stack = unique_units_count / unique_stacks_count
+        # 计算：密度比 = 实际单位数 / 物理层数
+        ratio = avg_units_per_stack / physical_height
+        
+        # 如果比率在 0.5 附近 (0.35 ~ 0.65)，说明大概率是复式 (2层1户)
+        if 0.35 <= ratio <= 0.65:
             return 2
-            
-    # 规则3: 面积辅助 (大户型且高层 -> 可能是复式)
+        # 如果比率接近 1.0 (> 0.8)，说明大概率是平层 (1层1户)
+        if ratio > 0.8:
+            return 1
+
+    # 规则 3: 数据稀疏时的兜底 (大户型 + 高楼 = 复式)
+    # 如果数据太少导致比率不准，则回退到面积判断
     avg_area = blk_df['Area (sqft)'].median() if 'Area (sqft)' in blk_df.columns else 0
-    if avg_area > 1600 and height > 10:
-        # 检查是否真的缺失奇数/偶数层
-        has_odd = any(f % 2 != 0 for f in floors)
-        has_even = any(f % 2 == 0 for f in floors)
-        # 如果只有奇数层 或 只有偶数层 -> Step=2
-        if not (has_odd and has_even):
-            return 2
-            
+    if avg_area > 1600 and physical_height > 8:
+        return 2
+
     return 1
 
 # ==================== 3. 业务算法 ====================
@@ -142,19 +148,19 @@ def estimate_inventory(df, category_col='Category'):
     for blk in unique_blocks:
         blk_df = df[df['BLK'] == blk]
         
-        # 🟢 调用统一的检测器
+        # 🟢 调用 V63 检测逻辑
         step = detect_block_step(blk_df)
         
         min_f = int(blk_df['Floor_Num'].min())
         max_f = int(blk_df['Floor_Num'].max())
         if min_f < 1: min_f = 1
         
-        # 计算单列户数
+        # 计算单列理论户数
         if step == 2:
-            # 复式: (24-2)/2 + 1 = 12
+            # 复式: (Max-Min)/2 + 1
             block_height_count = int((max_f - min_f) // 2) + 1
         else:
-            # 平层: 24-2+1 = 23
+            # 平层: Max-Min + 1
             block_height_count = (max_f - min_f) + 1
 
         unique_stacks = blk_df['Stack'].unique()
@@ -164,11 +170,13 @@ def estimate_inventory(df, category_col='Category'):
                 dominant_cat = stack_df[category_col].mode()[0]
                 final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + block_height_count
 
-    # 兜底
+    # 兜底：统计值不能小于实际观测值
     observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
     for cat in final_totals:
-        if final_totals[cat] < observed_counts.get(cat, 0):
-            final_totals[cat] = observed_counts.get(cat, 0)
+        estimated = final_totals[cat]
+        observed = observed_counts.get(cat, 0)
+        if estimated < observed:
+            final_totals[cat] = observed
             
     return final_totals
 
