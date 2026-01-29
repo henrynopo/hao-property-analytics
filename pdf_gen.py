@@ -1,140 +1,222 @@
-# tab3_avm.py
-import streamlit as st
+# pdf_gen.py
+from datetime import datetime
+from utils import AGENT_PROFILE
 import pandas as pd
-from utils import calculate_avm, calculate_ssd_status, calculate_resale_metrics
-from pdf_gen import generate_pdf_report, PDF_AVAILABLE
 
-def render(df, project_name, chart_font_size):
-    st.subheader("💎 单元智能估值 (AVM)")
+try:
+    from fpdf import FPDF
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
-    # 1. 接收来自 Tower View 的跳转参数
-    default_blk_idx = 0
-    default_stack_idx = 0
-    default_floor = 10
-
-    if 'avm_target' in st.session_state:
-        tgt = st.session_state['avm_target']
-        try:
-            blks = sorted(df['BLK'].unique())
-            default_blk_idx = blks.index(tgt['blk'])
+if PDF_AVAILABLE:
+    class PDFReport(FPDF):
+        def header(self):
+            # === Agent Letterhead (页眉) ===
+            self.set_font('Arial', 'B', 12)
+            self.set_text_color(50, 50, 50)
+            # 公司名 & 执照
+            self.cell(0, 6, f"{AGENT_PROFILE['Company']}", 0, 1, 'R')
+            self.set_font('Arial', '', 8)
+            self.cell(0, 4, f"Agency License: {AGENT_PROFILE['License']}", 0, 1, 'R')
             
-            stacks = sorted(df[df['BLK']==tgt['blk']]['Stack'].unique())
-            default_stack_idx = stacks.index(tgt['stack'])
+            # 经纪人信息
+            self.ln(2)
+            self.set_font('Arial', 'B', 10)
+            self.cell(0, 5, f"{AGENT_PROFILE['Name']} ({AGENT_PROFILE['Title']})", 0, 1, 'R')
+            self.set_font('Arial', '', 9)
+            self.cell(0, 5, f"CEA Reg: {AGENT_PROFILE['RES_No']} | Mobile: {AGENT_PROFILE['Mobile']}", 0, 1, 'R')
             
-            default_floor = tgt['floor']
-            st.success(f"已自动定位: Block {tgt['blk']} #{tgt['floor']}-{tgt['stack']}")
-            # 清除状态，避免锁死
-            del st.session_state['avm_target']
-        except:
-            pass
+            # 分割线
+            self.ln(5)
+            self.set_draw_color(200, 200, 200)
+            self.set_line_width(0.5)
+            self.line(10, self.get_y(), 200, self.get_y())
+            self.ln(5)
 
-    # 2. 输入区域
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        blks = sorted(df['BLK'].unique())
-        s_blk = st.selectbox("Block", blks, index=default_blk_idx, key="avm_blk")
-    with c2:
-        stacks = sorted(df[df['BLK']==s_blk]['Stack'].unique())
-        # 保护逻辑：防止 stack 列表为空
-        if not stacks: stacks = ['Unknown']
-        s_stack = st.selectbox("Stack", stacks, index=min(default_stack_idx, len(stacks)-1), key="avm_stack")
-    with c3:
-        s_floor = st.number_input("Floor", min_value=1, max_value=50, value=default_floor, step=1, key="avm_floor")
+        def footer(self):
+            self.set_y(-20)
+            self.set_font('Arial', 'I', 7)
+            self.set_text_color(150, 150, 150)
+            disclaimer = "Note: This valuation is an estimate based on recent transaction data (URA/Huttons) and is for reference only."
+            self.cell(0, 4, disclaimer, 0, 1, 'C')
+            self.cell(0, 4, f"Page {self.page_no()}", 0, 0, 'C')
 
-    # 3. 触发估值
-    if st.button("🚀 开始估值", type="primary", use_container_width=True):
+    def draw_gauge_bar(pdf, x, y, w, h, low, high, current):
+        # 绘制估值区间条
+        pdf.set_fill_color(240, 240, 240)
+        pdf.rect(x, y, w, h, 'F')
         
-        # 调用 utils.py 中的核心算法
-        area, val_psf, valuation, floor_diff, prem_rate, comps_df, subject_cat = calculate_avm(df, s_blk, s_stack, s_floor)
-
-        if area is None:
-            st.error("❌ 无法估值：该 Stack 数据不足，或者找不到基础户型信息。")
-            return
-
-        # === 显示结果 ===
-        st.markdown("---")
+        val_range = high - low
+        if val_range == 0: val_range = 1
+        safe_w = ((current - low) / val_range) * w
+        safe_w = max(0, min(w, safe_w))
         
-        # 核心大卡片
-        col_main, col_chart = st.columns([1, 1])
+        # 绿色进度条
+        pdf.set_fill_color(100, 200, 100) 
+        pdf.rect(x, y, safe_w, h, 'F')
         
-        with col_main:
-            st.caption(f"🎯 估值对象: {project_name} | {subject_cat}")
-            st.markdown(f"## {s_blk} #{s_floor:02d}-{s_stack}")
-            
-            metric_cols = st.columns(3)
-            metric_cols[0].metric("预估总价", f"${valuation/1e6:.2f}M")
-            metric_cols[1].metric("预估尺价", f"${val_psf:,.0f} psf")
-            metric_cols[2].metric("单位面积", f"{int(area):,} sqft")
-            
-            # 盈利与风险分析
-            # 获取上一次交易记录
-            target_unit_history = df[(df['BLK'] == s_blk) & (df['Stack'] == s_stack) & (df['Floor_Num'] == s_floor)].sort_values('Sale Date')
-            
-            last_price = 0
-            net_gain = 0
-            ssd_cost = 0
-            
-            if not target_unit_history.empty:
-                last_tx = target_unit_history.iloc[-1]
-                last_price = last_tx['Sale Price']
-                last_date = last_tx['Sale Date']
-                
-                # SSD 计算
-                ssd_rate, ssd_emoji, ssd_text = calculate_ssd_status(last_date)
-                ssd_cost = valuation * ssd_rate
-                
-                # 净利计算 (简单减法，不含印花税等)
-                net_gain = valuation - last_price - ssd_cost
-                
-                st.info(f"上次成交: ${last_price/1e6:.2f}M ({last_date.strftime('%Y-%m-%d')})")
-                
-                if ssd_rate > 0:
-                    st.warning(f"⚠️ {ssd_text}: 需缴纳约 ${ssd_cost/1e6:.2f}M 税费")
-                else:
-                    st.success(f"✅ SSD Free: 无需缴纳卖家印花税")
-                    
-                color = "green" if net_gain > 0 else "red"
-                st.markdown(f"**潜在账面收益:** :{color}[${net_gain/1e6:.2f}M]")
-            else:
-                st.warning("⚠️ 此单位无历史成交记录，无法计算增值。")
+        # 标记线
+        pdf.set_draw_color(0, 0, 0)
+        pdf.set_line_width(0.5)
+        pdf.line(x + safe_w, y - 2, x + safe_w, y + h + 2)
+        
+        # 标签
+        pdf.set_font('Arial', '', 7)
+        pdf.set_text_color(100, 100, 100)
+        pdf.text(x, y + h + 4, f"${low/1e6:.2f}M")
+        pdf.text(x + w - 10, y + h + 4, f"${high/1e6:.2f}M")
+        
+        pdf.set_font('Arial', 'B', 8)
+        pdf.set_text_color(0, 0, 0)
+        pdf.text(x + safe_w - 5, y - 3, "Est. Price")
 
-        # 参考数据展示
-        with col_chart:
-            st.caption("📉 最近同类成交参考 (Comps)")
-            st.dataframe(
-                comps_df[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']].style.format({
-                    'Sale Price': "${:,.0f}", 'Sale PSF': "${:,.0f}", 'Area (sqft)': "{:,.0f}"
-                }), 
-                height=200, use_container_width=True
-            )
-
-        # === 4. PDF 导出功能 ===
-        st.markdown("---")
-        if PDF_AVAILABLE:
-            # 准备数据包
-            unit_info = {'blk': s_blk, 'unit': f"{s_floor:02d}-{s_stack}"}
-            valuation_data = {'value': valuation, 'area': area, 'psf': val_psf}
-            analysis_data = {'net_gain': net_gain, 'ssd_cost': ssd_cost, 'last_price': last_price}
-            data_cutoff = df['Sale Date'].max().strftime('%Y-%m-%d')
-            
-            # 生成 PDF
-            pdf_bytes = generate_pdf_report(
-                project_name, 
-                unit_info, 
-                valuation_data, 
-                analysis_data, 
-                target_unit_history, # 历史记录
-                comps_df,            # 周边参考
-                data_cutoff
-            )
-            
-            st.download_button(
-                label="📄 下载正式估值报告 (PDF Letter)",
-                data=pdf_bytes,
-                file_name=f"Valuation_{project_name}_{s_blk}_{s_floor}-{s_stack}.pdf",
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True
-            )
+    def generate_pdf_report(project_name, unit_info, valuation_data, analysis_data, history_df, comps_df, data_cutoff):
+        pdf = PDFReport()
+        pdf.set_margins(20, 20, 20) # 增加页边距，像正式信函
+        pdf.add_page()
+        
+        # === 1. 信函顶部信息 ===
+        
+        # 日期 (右对齐)
+        pdf.set_y(40) # 留出 Header 空间
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 5, datetime.now().strftime('%d %B, %Y'), 0, 1, 'R')
+        
+        # 收件人地址 (左对齐 - 适合开窗信封)
+        pdf.set_y(45)
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 5, "To: The Subsidiary Proprietor / Owner", 0, 1, 'L')
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 5, f"Unit #{unit_info['unit']}", 0, 1, 'L') # 例如 #05-12
+        pdf.cell(0, 5, f"Block {unit_info['blk']}, {project_name}", 0, 1, 'L')
+        pdf.cell(0, 5, "Singapore", 0, 1, 'L')
+        
+        pdf.ln(15)
+        
+        # === 2. 正文开头 ===
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 6, "Dear Homeowner,", 0, 1, 'L')
+        pdf.ln(2)
+        
+        # 引导语
+        intro_text = (
+            f"I am writing to share a personalized market update for your unit at {project_name}. "
+            f"Based on recent transaction trends and our proprietary data models, we have prepared an estimated valuation for your property."
+        )
+        pdf.multi_cell(0, 6, intro_text)
+        pdf.ln(5)
+        
+        # === 3. 核心估值卡片 (Highlight Box) ===
+        box_y = pdf.get_y()
+        pdf.set_fill_color(248, 250, 252) # Very light blue background
+        pdf.rect(20, box_y, 170, 35, 'F')
+        
+        # 标题: 估值结果
+        pdf.set_y(box_y + 5)
+        pdf.set_font('Arial', 'B', 14)
+        pdf.set_text_color(44, 62, 80)
+        pdf.cell(0, 8, f"Estimated Value: ${valuation_data['value']/1e6:.2f} Million", 0, 1, 'C')
+        
+        # 副标题: 面积与单价
+        pdf.set_font('Arial', '', 11)
+        pdf.set_text_color(100, 100, 100)
+        detail_str = f"{int(valuation_data['area']):,} sqft  |  ${int(valuation_data['psf']):,} psf"
+        pdf.cell(0, 6, detail_str, 0, 1, 'C')
+        
+        # 仪表盘图表 (嵌入在卡片下方)
+        draw_gauge_bar(pdf, 45, pdf.get_y()+2, 120, 4, valuation_data['value']*0.95, valuation_data['value']*1.05, valuation_data['value'])
+        pdf.ln(15) # 跳过图表区域
+        
+        # === 4. 市场分析摘要 ===
+        pdf.set_y(pdf.get_y() + 5)
+        
+        # 盈利分析
+        gain = analysis_data['net_gain']
+        gain_txt = f"Potential Gain: ${gain/1e6:.2f}M" if gain > 0 else "Analysis: Hold for Upside"
+        color = (39, 174, 96) if gain > 0 else (100, 100, 100)
+        
+        pdf.set_font('Arial', 'B', 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(30, 6, "Analysis:", 0, 0)
+        pdf.set_text_color(*color)
+        pdf.cell(50, 6, gain_txt, 0, 0)
+        
+        # SSD 状态
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(25, 6, "SSD Status:", 0, 0)
+        ssd = analysis_data['ssd_cost']
+        if ssd > 0:
+            pdf.set_text_color(231, 76, 60)
+            pdf.cell(40, 6, f"Subject to SSD (${ssd/1e6:.2f}M)", 0, 1)
         else:
-            st.warning("⚠️ PDF 生成组件不可用，请检查 server 端 fpdf 库是否安装。")
+            pdf.set_text_color(39, 174, 96)
+            pdf.cell(40, 6, "SSD Free (Ready to Sell)", 0, 1)
+            
+        pdf.ln(5)
+        
+        # === 5. 交易数据表格 ===
+        
+        def print_table(df, title):
+            if df.empty: return
+            # Check page break
+            if pdf.get_y() > 220: pdf.add_page()
+            
+            pdf.set_font('Arial', 'B', 10)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(0, 8, title, 0, 1, 'L')
+            
+            # Header
+            pdf.set_fill_color(230, 230, 230)
+            pdf.set_font('Arial', 'B', 8)
+            col_w = [25, 30, 30, 25, 25] # Date, Unit, Price, PSF, Area
+            headers = ['Date', 'Unit', 'Price ($)', 'PSF ($)', 'Area']
+            
+            for i, h in enumerate(headers):
+                pdf.cell(col_w[i], 6, h, 1, 0, 'C', True)
+            pdf.ln()
+            
+            # Rows
+            pdf.set_font('Arial', '', 8)
+            for _, row in df.iterrows():
+                dt = row['Sale Date'].strftime('%d-%b-%y')
+                unit = row['Unit'] if 'Unit' in row else f"#{int(row.get('Floor_Num',0)):02d}-??"
+                px = f"${row['Sale Price']:,.0f}"
+                psf = f"${row['Sale PSF']:,.0f}"
+                area = f"{int(row['Area (sqft)'])}"
+                
+                pdf.cell(col_w[0], 6, dt, 1, 0, 'C')
+                pdf.cell(col_w[1], 6, unit, 1, 0, 'C')
+                pdf.cell(col_w[2], 6, px, 1, 0, 'C')
+                pdf.cell(col_w[3], 6, psf, 1, 0, 'C')
+                pdf.cell(col_w[4], 6, area, 1, 1, 'C')
+            pdf.ln(5)
+
+        # 打印表格
+        print_table(comps_df.head(5), "Recent Comparable Transactions (Neighbours)")
+        if not history_df.empty:
+            print_table(history_df, "Transaction History of This Unit")
+            
+        # === 6. 落款 (Call to Action) ===
+        if pdf.get_y() > 240: pdf.add_page()
+        pdf.ln(5)
+        
+        pdf.set_font('Arial', '', 11)
+        closing_text = (
+            "If you are considering restructuring your portfolio or would like a more detailed "
+            "financial calculation regarding your property assets, please feel free to contact me."
+        )
+        pdf.multi_cell(0, 6, closing_text)
+        pdf.ln(10)
+        
+        pdf.cell(0, 6, "Sincerely,", 0, 1)
+        pdf.ln(10) # 签名空间
+        
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 5, AGENT_PROFILE['Name'], 0, 1)
+        
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 5, f"{AGENT_PROFILE['Title']} | {AGENT_PROFILE['Company']}", 0, 1)
+        pdf.cell(0, 5, f"Mobile: {AGENT_PROFILE['Mobile']}", 0, 1)
+        
+        return bytes(pdf.output())
