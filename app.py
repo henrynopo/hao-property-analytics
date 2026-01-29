@@ -1,7 +1,7 @@
-# app.py
+# 文件名: app.py
 import streamlit as st
-# 🟢 确保这里的导入列表包含 utils.py 中定义的所有内容
-from utils import PROJECTS, load_data, auto_categorize, estimate_inventory, natural_key
+# 🟢 修正1: 增加导入 mark_penthouse
+from utils import PROJECTS, load_data, auto_categorize, estimate_inventory, natural_key, mark_penthouse
 import tab1_market
 import tab2_tower
 import tab3_avm
@@ -46,13 +46,19 @@ with st.sidebar:
 
 # ==================== 主界面 ====================
 if df is not None:
+    # 1. 户型分类
     df['Category'] = auto_categorize(df, category_method)
-    # 计算库存
+    
+    # 🟢 修正2: 必须先标记 Penthouse，生成 'Is_Special' 列，后续库存计算才不会报错
+    df['Is_Special'] = mark_penthouse(df)
+
+    # 2. 计算库存 (依赖 Is_Special 列)
     if inventory_mode == "🤖 自动推定 (V11智能版)" and 'Stack' in df.columns:
         inv_map = estimate_inventory(df, 'Category')
     else:
         inv_map = {c: 100 for c in df['Category'].unique()}
 
+    # 3. 渲染界面
     st.title(f"🏙️ {project_name} 市场透视")
     st.caption(f"数据范围: {df['Sale Date'].min().date()} 至 {df['Sale Date'].max().date()} | 总交易: {len(df)} 宗")
 
