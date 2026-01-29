@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import calendar
 import re 
 import numpy as np
-from sklearn.linear_model import LinearRegression
+# 🟢 移除 sklearn，改用 numpy 原生实现
 
 # ==========================================
 # 🔧 1. 配置中心 (项目列表)
@@ -209,30 +209,39 @@ def get_dynamic_floor_premium(df, category):
     else:
         return 0.005
 
-# 🟢 V41 核心升级: 线性回归平滑指数
+# 🟢 V42 核心升级: 使用 numpy 原生进行线性回归 (无依赖版)
 def get_market_trend_model(df):
     """
-    📈 使用线性回归拟合全盘 PSF 趋势
-    返回一个 (model, model_score) 元组
+    📈 使用 numpy.polyfit 拟合全盘 PSF 趋势
+    返回一个 (trend_func, r_squared) 元组
     """
     df_clean = df.dropna(subset=['Sale PSF', 'Date_Ordinal']).copy()
-    if len(df_clean) < 10: return None, 0 # 数据太少，不拟合
+    if len(df_clean) < 10: return None, 0 
     
-    # 剔除极端离群值 (Outliers)
+    # 剔除极端离群值
     q1 = df_clean['Sale PSF'].quantile(0.10)
     q3 = df_clean['Sale PSF'].quantile(0.90)
     df_clean = df_clean[(df_clean['Sale PSF'] >= q1) & (df_clean['Sale PSF'] <= q3)]
     
-    X = df_clean[['Date_Ordinal']]
-    y = df_clean['Sale PSF']
+    x = df_clean['Date_Ordinal'].values
+    y = df_clean['Sale PSF'].values
     
-    model = LinearRegression()
-    model.fit(X, y)
-    return model, model.score(X, y)
+    # 1次多项式拟合 (即线性回归 y = mx + c)
+    # slope, intercept
+    coeffs = np.polyfit(x, y, 1) 
+    trend_func = np.poly1d(coeffs)
+    
+    # 计算 R-squared
+    y_pred = trend_func(x)
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+    
+    return trend_func, r2
 
 def calculate_avm(df, blk, stack, floor):
     """
-    🤖 AVM 自动估值模型 (V10: 线性回归稳健修正)
+    🤖 AVM 自动估值模型 (V11: Numpy版稳健修正)
     """
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
@@ -269,42 +278,38 @@ def calculate_avm(df, blk, stack, floor):
     if comps.empty:
         return subject_area, 0, 0, 0, 0.005, pd.DataFrame(), subject_cat
 
-    # 🟢 2. 稳健时间修正 (Robust Time Adjustment)
-    trend_model, r2 = get_market_trend_model(df)
+    # 🟢 2. 稳健时间修正 (Numpy Implementation)
+    trend_func, r2 = get_market_trend_model(df)
     current_date_ordinal = last_date.toordinal()
     
-    # 只有当 R2 > 0.1 (说明确实有趋势) 时才应用修正，否则视为横盘
-    use_trend = trend_model is not None and r2 > 0.1
+    # 只有当 R2 > 0.1 (说明确实有趋势) 时才应用修正
+    use_trend = trend_func is not None and r2 > 0.1
     
     def adjust_psf(row):
         if not use_trend: return row['Sale PSF']
         
         sale_ordinal = row['Sale Date'].toordinal()
-        # 预测该时刻的趋势线价格
-        pred_then = trend_model.predict([[sale_ordinal]])[0]
-        pred_now = trend_model.predict([[current_date_ordinal]])[0]
+        # 使用 numpy poly1d 函数预测
+        pred_then = trend_func(sale_ordinal)
+        pred_now = trend_func(current_date_ordinal)
         
         if pred_then <= 0: return row['Sale PSF']
         
         ratio = pred_now / pred_then
-        # 钳制系数 (Clamp): 防止修正过猛，限制在 0.8 ~ 1.2 之间
+        # 钳制系数
         ratio = max(0.8, min(1.2, ratio))
-        
         return row['Sale PSF'] * ratio
 
     comps['Adj_PSF'] = comps.apply(adjust_psf, axis=1)
 
-    # 3. 计算基准参数
     premium_rate = get_dynamic_floor_premium(df, subject_cat)
-    base_psf = comps['Adj_PSF'].median() # 使用稳健修正后的 PSF
+    base_psf = comps['Adj_PSF'].median()
     base_floor = comps['Floor_Num'].median()
     
-    # 4. 计算模型估值
     floor_diff = floor - base_floor
     adjustment_factor = 1 + (floor_diff * premium_rate)
     model_psf = base_psf * adjustment_factor
     
-    # 5. 自身历史修正
     final_psf = model_psf
     if last_price_psf is not None:
         years_since_tx = (last_date - last_tx_date).days / 365.25
@@ -616,7 +621,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v41_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v42_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
