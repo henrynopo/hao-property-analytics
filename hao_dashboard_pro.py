@@ -19,14 +19,15 @@ except ImportError:
 # ==========================================
 # 🔧 1. 配置中心 (项目列表 & 个人品牌)
 # ==========================================
+# 🟢 修正后的个人信息
 AGENT_PROFILE = {
-    "Name": "Henry HAO",
+    "Name": "Henry GUO",
     "Title": "Associate District Director",
     "Company": "Huttons Asia Pte Ltd",
     "License": "L3008899K",
-    "RES_No": "R0123456Z", 
-    "Mobile": "+65 9123 4567",
-    "Email": "henry.hao@huttons.com"
+    "RES_No": "R059451F", 
+    "Mobile": "+65 8808 6086",
+    "Email": "henry.guo@huttons.com" # 猜测邮箱，可自行修改
 }
 
 try:
@@ -394,7 +395,7 @@ if PDF_AVAILABLE:
             self.set_y(-25)
             self.set_font('Arial', 'I', 8)
             self.set_text_color(150, 150, 150)
-            disclaimer = "Disclaimer: This report is for reference only. Valuations are estimates based on AVM models. Data Source: URA / Huttons Analytics. Data is deemed accurate but not guaranteed."
+            disclaimer = "Disclaimer: For reference only. Values are estimates (AVM), not certified. Data: URA/Huttons. Accuracy not guaranteed."
             self.multi_cell(0, 4, disclaimer, 0, 'C')
             self.set_y(-15)
             self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
@@ -402,43 +403,81 @@ if PDF_AVAILABLE:
         def add_watermark(self):
             self.set_font('Arial', 'B', 50)
             self.set_text_color(240, 240, 240)
+            # 🟢 V49: 水印居中 (Center of A4 Page: 210x297mm)
             with self.rotation(45, 105, 148):
-                self.text(30, 190, "CONFIDENTIAL")
-                self.text(40, 210, AGENT_PROFILE['Name'].upper())
+                self.text(50, 190, AGENT_PROFILE['Name'].upper())
 
-    def generate_pdf_report(project_name, unit_info, valuation_data, history_df, comps_df, data_cutoff_date):
+    def generate_pdf_report(project_name, unit_info, valuation_data, analysis_data, history_df, comps_df, data_cutoff_date):
         pdf = PDFReport()
         pdf.add_page()
         pdf.add_watermark()
         
+        # Title
         pdf.set_font('Arial', 'B', 24)
         pdf.set_text_color(44, 62, 80)
         pdf.cell(0, 10, f"Valuation Report: {project_name}", 0, 1, 'C')
         pdf.ln(5)
         
+        # Subtitle
         pdf.set_font('Arial', '', 14)
         pdf.cell(0, 8, f"Unit: Block {unit_info['blk']} {unit_info['unit']}", 0, 1, 'C')
         pdf.set_font('Arial', 'I', 10)
-        pdf.cell(0, 6, f"Date Generated: {datetime.now().strftime('%Y-%m-%d')} | Data Cutoff: {data_cutoff_date}", 0, 1, 'C')
+        pdf.cell(0, 6, f"Generated: {datetime.now().strftime('%Y-%m-%d')} | Data Cutoff: {data_cutoff_date}", 0, 1, 'C')
         pdf.ln(10)
         
-        pdf.set_fill_color(240, 248, 255)
-        pdf.rect(10, pdf.get_y(), 190, 40, 'F')
+        # 🟢 1. Valuation Box
+        pdf.set_fill_color(240, 248, 255) # Light Blue
+        pdf.rect(10, pdf.get_y(), 190, 35, 'F')
         pdf.set_y(pdf.get_y() + 5)
         
         pdf.set_font('Arial', 'B', 12)
-        pdf.cell(60, 8, "Estimated Value", 0, 0, 'C')
-        pdf.cell(60, 8, "Area (sqft)", 0, 0, 'C')
-        pdf.cell(60, 8, "Est. PSF", 0, 1, 'C')
+        pdf.cell(63, 8, "Estimated Value", 0, 0, 'C')
+        pdf.cell(63, 8, "Area (sqft)", 0, 0, 'C')
+        pdf.cell(63, 8, "Est. PSF", 0, 1, 'C')
         
         pdf.set_font('Arial', 'B', 16)
-        pdf.set_text_color(39, 174, 96)
-        pdf.cell(60, 10, f"${valuation_data['value']/1e6:.2f}M", 0, 0, 'C')
+        pdf.set_text_color(39, 174, 96) # Green
+        pdf.cell(63, 10, f"${valuation_data['value']/1e6:.2f}M", 0, 0, 'C')
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(60, 10, f"{int(valuation_data['area']):,}", 0, 0, 'C')
-        pdf.cell(60, 10, f"${int(valuation_data['psf']):,}", 0, 1, 'C')
+        pdf.cell(63, 10, f"{int(valuation_data['area']):,}", 0, 0, 'C')
+        pdf.cell(63, 10, f"${int(valuation_data['psf']):,}", 0, 1, 'C')
         pdf.ln(20)
+
+        # 🟢 2. Investment Analysis Box (V49 New Feature)
+        pdf.set_fill_color(255, 250, 240) # Floral White
+        pdf.rect(10, pdf.get_y(), 190, 35, 'F')
+        pdf.set_y(pdf.get_y() + 5)
         
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(63, 8, "Est. Net Gain", 0, 0, 'C')
+        pdf.cell(63, 8, "SSD Cost", 0, 0, 'C')
+        pdf.cell(63, 8, "Last Transacted", 0, 1, 'C')
+        
+        pdf.set_font('Arial', 'B', 14)
+        
+        # Net Gain Color
+        if analysis_data['net_gain'] > 0: pdf.set_text_color(39, 174, 96)
+        elif analysis_data['net_gain'] < 0: pdf.set_text_color(231, 76, 60)
+        else: pdf.set_text_color(100, 100, 100)
+        
+        gain_str = f"${analysis_data['net_gain']/1e6:.2f}M ({analysis_data['net_gain_pct']:+.1%})"
+        if analysis_data['is_simulated']: gain_str += "*"
+        pdf.cell(63, 10, gain_str, 0, 0, 'C')
+        
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(63, 10, f"${analysis_data['ssd_cost']/1e6:.2f}M", 0, 0, 'C')
+        
+        last_tx_str = f"${analysis_data['last_price']/1e6:.2f}M" if analysis_data['last_price'] > 0 else "N/A"
+        pdf.cell(63, 10, last_tx_str, 0, 1, 'C')
+        
+        if analysis_data['is_simulated']:
+            pdf.set_font('Arial', 'I', 8)
+            pdf.set_text_color(100, 100, 100)
+            pdf.cell(0, 6, f"* Simulated gain based on avg price in {analysis_data['sim_year']}. No actual history found.", 0, 1, 'C')
+        
+        pdf.ln(15)
+        
+        # Table Helper
         def add_table(df, title):
             pdf.set_font('Arial', 'B', 12)
             pdf.set_text_color(44, 62, 80)
@@ -478,9 +517,8 @@ if PDF_AVAILABLE:
             pdf.ln(10)
 
         add_table(history_df.head(10), "Unit Transaction History")
-        add_table(comps_df.head(10), "Comparable Transactions")
+        add_table(comps_df.head(10), "Comparable Transactions (Valuation Basis)")
         
-        # 🟢 修复: 强制转换为 bytes 避免 bytearray 报错
         return bytes(pdf.output())
 
 # ==========================================
@@ -744,7 +782,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v46_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v49_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -820,23 +858,34 @@ if df is not None:
                     m2.metric(f"📊 估算 PSF ({premium_txt} 溢价)", f"${int(est_psf):,} psf", f"{floor_diff:+.0f} 层 (vs 均值)", delta_color=delta_c)
                     m3.metric("💰 HAO 估值 (Est. Value)", f"${value/1e6:.2f}M")
                     
+                    # 分析数据准备 (Analysis Data)
                     history_unit = df[(df['BLK'] == sel_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)].sort_values('Sale Date', ascending=False)
+                    
+                    analysis_data = {
+                        'net_gain': 0, 'net_gain_pct': 0, 'ssd_cost': 0, 'last_price': 0, 
+                        'is_simulated': False, 'sim_year': 0
+                    }
                     
                     if not history_unit.empty:
                         last_price = history_unit.iloc[0]['Sale Price']
                         last_date_val = history_unit.iloc[0]['Sale Date']
-                        
                         ssd_rate, ssd_emoji, ssd_text = calculate_ssd_status(last_date_val)
                         est_gross_gain = value - last_price
                         ssd_cost = value * ssd_rate 
                         net_gain = est_gross_gain - ssd_cost
                         net_gain_pct = net_gain / last_price
-                        gain_color = "normal" if net_gain > 0 else "inverse"
                         
+                        gain_color = "normal" if net_gain > 0 else "inverse"
                         m4.metric("🚀 预估净增值 (Net Gain)", f"${net_gain/1e6:.2f}M", f"{net_gain_pct:+.1%}", delta_color=gain_color)
                         
                         if ssd_rate > 0: st.caption(f"⚠️ {ssd_text}: 扣除印花税 ${ssd_cost/1e6:.2f}M")
                         else: st.caption(f"✅ SSD Free: 无需扣除")
+                        
+                        # Pack for PDF
+                        analysis_data.update({
+                            'net_gain': net_gain, 'net_gain_pct': net_gain_pct, 
+                            'ssd_cost': ssd_cost, 'last_price': last_price
+                        })
                     else:
                         earliest_year = int(df['Sale Year'].min())
                         base_recs = df[(df['Sale Year'] == earliest_year) & (df['Category'] == subject_cat)]
@@ -847,6 +896,12 @@ if df is not None:
                             sim_pct = sim_gain / est_cost
                             m4.metric(f"🔮 模拟增值 (自{earliest_year}年)", f"${sim_gain/1e6:.2f}M", f"{sim_pct:+.1%} (基于当年均价)", delta_color="off")
                             st.caption(f"*注：该单元无历史交易。")
+                            
+                            # Pack for PDF
+                            analysis_data.update({
+                                'net_gain': sim_gain, 'net_gain_pct': sim_pct, 
+                                'is_simulated': True, 'sim_year': earliest_year
+                            })
                         else:
                             m4.metric("🚀 预估增值", "-", "无同期基准")
                     
@@ -884,10 +939,14 @@ if df is not None:
                         unit_info = {'blk': sel_blk, 'unit': unit_label}
                         valuation_data = {'value': value, 'area': area, 'psf': int(est_psf)}
                         
-                        pdf_bytes = generate_pdf_report(project_name, unit_info, valuation_data, history_unit, comps_df, data_cutoff_date)
+                        pdf_bytes = generate_pdf_report(
+                            project_name, unit_info, valuation_data, 
+                            analysis_data, # 🟢 V49: 传入完整的投资分析数据
+                            history_unit, comps_df, data_cutoff_date
+                        )
                         
                         st.download_button(
-                            label="📥 下载 PDF 估值报告 (Professional Report)",
+                            label="📥 下载 PDF 估值报告 (Full Report)",
                             data=pdf_bytes,
                             file_name=f"Valuation_{sel_blk}_{unit_label}.pdf",
                             mime='application/pdf',
