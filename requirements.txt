@@ -1,6 +1,6 @@
-streamlit>=1.40.0
+streamlit
 pandas
 plotly
-openpyxl
-matplotlib
-fpdf2
+numpy
+python-dateutil
+fpdf
