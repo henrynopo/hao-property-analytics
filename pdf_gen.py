@@ -55,7 +55,7 @@ if PDF_AVAILABLE:
         pdf.set_margins(20, 20, 20)
         pdf.add_page()
         
-        # Date & To
+        # Header Info
         pdf.set_y(40)
         pdf.set_font('helvetica', '', 10)
         pdf.cell(0, 5, datetime.now().strftime('%d %B, %Y'), new_x="LMARGIN", new_y="NEXT", align='R')
@@ -73,7 +73,7 @@ if PDF_AVAILABLE:
         pdf.multi_cell(0, 6, f"Here is a market update and estimated valuation for your unit at {project_name}.")
         pdf.ln(5)
         
-        # Box
+        # Valuation Box
         box_y = pdf.get_y()
         pdf.set_fill_color(248, 250, 252)
         pdf.rect(20, box_y, 170, 35, 'F')
@@ -108,15 +108,11 @@ if PDF_AVAILABLE:
             pdf.set_fill_color(230, 230, 230)
             pdf.set_font('helvetica', 'B', 8)
             
-            # 🟢 动态列适配：不强制要求 Type of Sale
-            cols_map = {'Sale Date': 25, 'Unit': 25, 'Sale Price': 30, 'Sale PSF': 25, 'Area': 25, 'Type of Sale': 30}
-            # 找出 df 中有的列，并且是我们想要的
-            valid_cols = [c for c in cols_map.keys() if c in df.columns or c == 'Unit' or c == 'Area']
-            # 这里简化处理，强制打印固定列，防止错位，但做空值保护
-            
             headers = ['Date', 'Price ($)', 'PSF ($)']
             widths = [30, 40, 30]
-            if 'Unit' in df.columns or 'Floor_Num' in df.columns: 
+            # 动态判断是否有 Unit 列
+            has_unit = 'Unit' in df.columns or 'Floor_Num' in df.columns
+            if has_unit: 
                 headers.insert(1, 'Unit'); widths.insert(1, 30)
             
             for i, h in enumerate(headers):
@@ -132,7 +128,7 @@ if PDF_AVAILABLE:
                 pdf.cell(widths[0], 6, dt, 1, 0, 'C')
                 
                 idx = 1
-                if 'Unit' in headers:
+                if has_unit:
                     u = row.get('Unit', f"#{int(row.get('Floor_Num',0))}-xx")
                     pdf.cell(widths[idx], 6, str(u), 1, 0, 'C')
                     idx += 1
@@ -153,4 +149,5 @@ if PDF_AVAILABLE:
         pdf.set_font('helvetica', 'B', 11)
         pdf.cell(0, 5, AGENT_PROFILE['Name'], new_x="LMARGIN", new_y="NEXT")
         
-        return pdf.output()
+        # 🟢 修复核心: 强制转换为 bytes 类型
+        return bytes(pdf.output())
