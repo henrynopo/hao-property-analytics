@@ -95,7 +95,7 @@ def mark_penthouse(df):
     medians = df.groupby('Category')['Area (sqft)'].median()
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
-# ==================== 3. 业务算法 (V60 智能跳层识别版) ====================
+# ==================== 3. 业务算法 (V61 启发式修正版) ====================
 
 def estimate_inventory(df, category_col='Category'):
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: return {}
@@ -113,41 +113,63 @@ def estimate_inventory(df, category_col='Category'):
     for blk in unique_blocks:
         blk_df = df[df['BLK'] == blk]
         
-        # 🟢 1. 智能步长检测 (Step Detection)
-        # 找出该栋楼所有出现过的楼层
-        floors = sorted(blk_df['Floor_Num'].dropna().unique())
-        
-        step = 1 # 默认为平层
-        if len(floors) >= 2:
-            # 计算楼层间的差距: [2, 4, 6] -> diffs=[2, 2] -> mode=2
-            diffs = np.diff(floors)
-            # 只看 1, 2, 3 这种常规间距，忽略因为数据缺失导致的大间距
-            valid_diffs = [d for d in diffs if d <= 3]
-            if valid_diffs:
-                # 取出现最频繁的间距
-                mode_step = int(pd.Series(valid_diffs).mode()[0])
-                if mode_step > 1:
-                    step = mode_step
-        
-        # 2. 获取物理高度
+        # 1. 检测整栋楼的物理高度
         min_f = int(blk_df['Floor_Num'].min())
         max_f = int(blk_df['Floor_Num'].max())
         if min_f < 1: min_f = 1
         
-        # 🟢 3. 计算修正后的单列户数
-        # 公式: (顶层 - 底层) / 步长 + 1
-        # 例如: 2~24楼, 步长2 -> (24-2)/2 + 1 = 11+1 = 12户 (正确)
-        # 之前V59: 24-2+1 = 23户 (错误)
-        block_height_count = int((max_f - min_f) // step) + 1
+        # 🟢 2. 强力步长推断 (Heuristic Step Detection)
+        # 默认步长
+        step = 1 
         
+        # 证据A: 楼层间隔
+        floors = sorted(blk_df['Floor_Num'].dropna().unique())
+        if len(floors) >= 2:
+            diffs = np.diff(floors)
+            valid_diffs = [d for d in diffs if d <= 3]
+            if valid_diffs:
+                mode_step = int(pd.Series(valid_diffs).mode()[0])
+                if mode_step > 1: step = mode_step
+        
+        # 证据B: 户型名称 (强制覆盖)
+        # 如果数据里包含 "Maisonette" 字样，强制 Step=2
+        # Braddell View 的大户型通常是 Maisonette
+        avg_area = blk_df['Area (sqft)'].median() if 'Area (sqft)' in blk_df.columns else 0
+        if avg_area > 1500 and step == 1:
+            # 这是一个大胆的假设：如果平均面积很大且目前判断是平层，可能是误判
+            # 检查是否有连续楼层 (1,2,3,4...) 
+            # 如果没有连续楼层 (例如只有 2, 4, 8, 12)，那肯定是 Step=2
+            has_consecutive = any(diff == 1 for diff in diffs)
+            if not has_consecutive:
+                step = 2
+        
+        # 3. 计算单列理论户数
+        raw_height_count = (max_f - min_f) + 1
+        
+        # 如果 Step=2，则户数减半
+        if step == 2:
+            final_stack_count = int(raw_height_count / 2) + 1
+        else:
+            final_stack_count = raw_height_count
+
+        # 4. 累加到主导户型
         unique_stacks = blk_df['Stack'].unique()
         for stack in unique_stacks:
             stack_df = blk_df[blk_df['Stack'] == stack]
             if not stack_df.empty:
                 dominant_cat = stack_df[category_col].mode()[0]
-                final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + block_height_count
+                
+                # 🟢 5. 单列合理性校验 (Sanity Check)
+                # 如果算出来单列有 25 户，但这是一种超大户型(>1500sf)，这不科学
+                # 大概率是步长判错了，强制修正为减半
+                cat_avg_area = df[df[category_col] == dominant_cat]['Area (sqft)'].median()
+                if final_stack_count > 20 and cat_avg_area > 1500:
+                    corrected_count = int(final_stack_count / 2)
+                    final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + corrected_count
+                else:
+                    final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + final_stack_count
 
-    # 4. 兜底逻辑
+    # 6. 兜底逻辑
     observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
     for cat in final_totals:
         estimated = final_totals[cat]
