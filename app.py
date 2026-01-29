@@ -1,4 +1,6 @@
+# app.py
 import streamlit as st
+# 🟢 确保这里的导入列表包含 utils.py 中定义的所有内容
 from utils import PROJECTS, load_data, auto_categorize, estimate_inventory, natural_key
 import tab1_market
 import tab2_tower
