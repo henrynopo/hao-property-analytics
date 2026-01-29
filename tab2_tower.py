@@ -1,26 +1,14 @@
-# 文件名: tab2_tower.py (请务必确认文件名是这个！)
+# 文件名: tab2_tower.py
 import streamlit as st
 import pandas as pd
 import re
 
-# --- UI组件: 统一 KPI 卡片 ---
-def kpi_card(label, value, sub_value=None, color="default"):
-    color_map = {"default": "#111827", "blue": "#2563eb"}
-    text_color = color_map.get(color, "#111827")
-    sub_html = f'<div style="font-size: 12px; color: #6b7280; margin-top: 2px;">{sub_value}</div>' if sub_value else ""
-    return f"""
-    <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; text-align: center;">
-        <div style="font-size: 13px; color: #6b7280; margin-bottom: 4px;">{label}</div>
-        <div style="font-size: 18px; font-weight: 700; color: {text_color};">{value}</div>
-        {sub_html}
-    </div>
-    """
-
+# 自然排序函数 (保留，为了列顺序正常)
 def natural_key(string_):
     if not isinstance(string_, str): return [0]
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', string_)]
 
-# 🟢 核心：接收 chart_font_size 参数，修复 TypeError
+# 接口兼容 (保留 chart_font_size 防止报错，但内部不乱用它干扰布局)
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
 
@@ -30,71 +18,100 @@ def render(df, chart_font_size=12):
 
     # 2. 数据准备
     blk_df = df[df['BLK'] == selected_blk].copy()
-    
-    # Block 概览 KPI
-    if not blk_df.empty:
-        vol = len(blk_df)
-        avg_psf = blk_df['Sale PSF'].mean()
-        max_price = blk_df['Sale Price'].max()
-        
-        c1, c2, c3 = st.columns(3)
-        with c1: st.markdown(kpi_card("本座成交量", f"{vol} 笔", color="default"), unsafe_allow_html=True)
-        with c2: st.markdown(kpi_card("本座均价", f"${avg_psf:,.0f} psf", color="blue"), unsafe_allow_html=True)
-        with c3: st.markdown(kpi_card("本座最高价", f"${max_price/1e6:.2f}M", color="default"), unsafe_allow_html=True)
-        st.markdown("---")
 
-    # 3. 网格逻辑
+    # 3. 处理楼层排序
     if 'Floor_Num' in blk_df.columns:
         blk_df['Floor_Sort'] = blk_df['Floor_Num'].fillna(0).astype(int)
     else:
         blk_df['Floor_Sort'] = blk_df['Floor'].astype(str).str.extract(r'(\d+)')[0].fillna(0).astype(int)
 
+    # 取每个格子最新的一笔交易
     latest_tx = blk_df.sort_values('Sale Date').groupby(['Floor_Sort', 'Stack']).tail(1)
-    
-    # 🟢 动态字体逻辑：基于 chart_font_size 调整网格内文字大小
-    scale_ratio = chart_font_size / 12.0
-    fs_price = int(14 * scale_ratio)
-    fs_psf = int(12 * scale_ratio)
-    fs_date = int(10 * scale_ratio)
 
+    # 4. 构造 HTML 内容 (回归经典简洁样式)
     def make_cell_html(row):
         price = f"${row['Sale Price']/1e6:.2f}M"
-        psf = f"${row['Sale PSF']:,.0f} psf"
+        psf = f"${row['Sale PSF']:,.0f}"
         date = row['Sale Date'].strftime('%y-%m') if isinstance(row['Sale Date'], pd.Timestamp) else str(row['Sale Date'])[:7]
+        
+        # 简洁的三行布局
         return f"""
-        <div style="text-align: center; line-height: 1.2;">
-            <div style="font-weight: bold; font-size: {fs_price}px;">{price}</div>
-            <div style="font-size: {fs_psf}px; color: #555;">{psf}</div>
-            <div style="font-size: {fs_date}px; color: #999;">{date}</div>
+        <div style="text-align: center; line-height: 1.3;">
+            <div style="font-weight: bold; font-size: 14px; color: #333;">{price}</div>
+            <div style="font-size: 12px; color: #666;">{psf} psf</div>
+            <div style="font-size: 11px; color: #999;">{date}</div>
         </div>
         """
     
     latest_tx['display_html'] = latest_tx.apply(make_cell_html, axis=1)
 
     if not latest_tx.empty:
+        # 生成透视表
         unit_grid = latest_tx.pivot(index='Floor_Sort', columns='Stack', values='display_html')
-        # 严谨排序 Stack
-        sorted_cols = sorted(unit_grid.columns.tolist(), key=natural_key)
-        unit_grid = unit_grid.reindex(columns=sorted_cols).sort_index(ascending=False)
         
-        # 渲染
+        # 严谨排序列 (Stack)
+        sorted_cols = sorted(unit_grid.columns.tolist(), key=natural_key)
+        unit_grid = unit_grid.reindex(columns=sorted_cols)
+        
+        # 倒序排列行 (楼层高在下 -> 实际上通常楼宇图是高层在上，即倒序索引)
+        unit_grid = unit_grid.sort_index(ascending=False)
+        
+        # 5. 渲染网格 (使用 Streamlit Columns)
+        # 表头
         cols = st.columns([1] + [2] * len(unit_grid.columns))
-        with cols[0]: st.markdown(f"<div style='font-size:{chart_font_size}px; font-weight:bold'>Floor</div>", unsafe_allow_html=True)
+        with cols[0]:
+            st.markdown("**Floor**")
         for i, stack_name in enumerate(unit_grid.columns):
-            with cols[i+1]: st.markdown(f"<div style='text-align: center; font-weight: bold; font-size:{chart_font_size}px'>{stack_name}</div>", unsafe_allow_html=True)
+            with cols[i+1]:
+                st.markdown(f"<div style='text-align: center; font-weight: bold;'>{stack_name}</div>", unsafe_allow_html=True)
             
         st.markdown("---")
 
+        # 表体
         for floor_num, row in unit_grid.iterrows():
             c_row = st.columns([1] + [2] * len(unit_grid.columns))
-            with c_row[0]: st.markdown(f"<div style='font-size:{chart_font_size}px; font-weight:bold'>L{floor_num}</div>", unsafe_allow_html=True)
+            
+            # 楼层号
+            with c_row[0]:
+                st.markdown(f"**L{floor_num}**")
+                
+            # 单元格
             for i, stack_name in enumerate(unit_grid.columns):
                 content = row[stack_name]
                 with c_row[i+1]:
                     if pd.isna(content):
-                        st.markdown("<div style='background-color: #f0f2f6; border-radius: 4px; height: 60px; display: flex; align-items: center; justify-content: center; color: #ccc;'>-</div>", unsafe_allow_html=True)
+                        # 空白格样式
+                        st.markdown("""
+                        <div style="
+                            background-color: #f8f9fa; 
+                            border: 1px dashed #dee2e6; 
+                            border-radius: 4px; 
+                            height: 60px; 
+                            display: flex; 
+                            align-items: center; 
+                            justify-content: center;
+                            color: #adb5bd;
+                            font-size: 12px;
+                            margin-bottom: 6px;
+                        ">
+                            -
+                        </div>
+                        """, unsafe_allow_html=True)
                     else:
-                        st.markdown(f"<div style='background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 4px; margin-bottom: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);'>{content}</div>", unsafe_allow_html=True)
+                        # 交易格样式 (白底阴影卡片)
+                        st.markdown(f"""
+                        <div style="
+                            background-color: #ffffff; 
+                            border: 1px solid #e9ecef; 
+                            border-radius: 6px; 
+                            padding: 4px; 
+                            margin-bottom: 6px;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+                            transition: transform 0.1s;
+                        ">
+                            {content}
+                        </div>
+                        """, unsafe_allow_html=True)
     else:
         st.info("该楼座暂无交易数据")
 
