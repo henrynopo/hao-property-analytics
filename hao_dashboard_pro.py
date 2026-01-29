@@ -8,20 +8,23 @@ from dateutil.relativedelta import relativedelta
 import calendar
 import re 
 import numpy as np
-from fpdf import FPDF
-import base64
-import io
+
+# 🟢 防崩溃导入
+try:
+    from fpdf import FPDF
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
 # ==========================================
 # 🔧 1. 配置中心 (项目列表 & 个人品牌)
 # ==========================================
-# 🟢 请在这里修改您的个人信息
 AGENT_PROFILE = {
     "Name": "Henry HAO",
     "Title": "Associate District Director",
     "Company": "Huttons Asia Pte Ltd",
     "License": "L3008899K",
-    "RES_No": "R0123456Z", # 请替换真实号码
+    "RES_No": "R0123456Z", 
     "Mobile": "+65 9123 4567",
     "Email": "henry.hao@huttons.com"
 }
@@ -226,7 +229,6 @@ def calculate_ssd_status(purchase_date):
     if purchase_dt >= NEW_POLICY_DATE:
         ssd_deadline = purchase_dt + relativedelta(years=4)
         remaining_days = (ssd_deadline - now).days
-        
         if held_years < 1: rate, emoji, status_text = 0.16, "🔴", "SSD 16%"
         elif held_years < 2: rate, emoji, status_text = 0.12, "🔴", "SSD 12%"
         elif held_years < 3: rate, emoji, status_text = 0.08, "🔴", "SSD 8%"
@@ -237,14 +239,12 @@ def calculate_ssd_status(purchase_date):
     elif purchase_dt >= datetime(2017, 3, 11):
         ssd_deadline = purchase_dt + relativedelta(years=3)
         remaining_days = (ssd_deadline - now).days
-        
         if held_years < 1: rate, emoji, status_text = 0.12, "🔴", "SSD 12%"
         elif held_years < 2: rate, emoji, status_text = 0.08, "🔴", "SSD 8%"
         elif held_years < 3:
             rate = 0.04
             if remaining_days <= 180: emoji, status_text = "🟡", "SSD 4% (<6m)"
             else: emoji, status_text = "🔴", "SSD 4%"
-    
     return rate, emoji, status_text
 
 def get_market_trend_model(df):
@@ -265,7 +265,6 @@ def get_market_trend_model(df):
 
 def calculate_avm(df, blk, stack, floor):
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
-    
     if not target_unit.empty:
         subject_area = target_unit['Area (sqft)'].iloc[0]
         subject_cat = target_unit['Category'].iloc[0]
@@ -375,136 +374,114 @@ def format_currency(val):
     try: return f"${val:,.0f}"
     except: return val
 
-# 🟢 PDF Class for Report Generation
-class PDFReport(FPDF):
-    def header(self):
-        # Company & Agent Info Header
-        self.set_font('Arial', 'B', 10)
-        self.set_text_color(100, 100, 100)
-        
-        # Left: Company
-        self.cell(0, 5, f"{AGENT_PROFILE['Company']} ({AGENT_PROFILE['License']})", 0, 1, 'L')
-        
-        # Right: Agent Info (Manual positioning for right align)
-        self.set_y(10)
-        self.set_font('Arial', '', 9)
-        info_text = f"{AGENT_PROFILE['Name']} | {AGENT_PROFILE['RES_No']} | {AGENT_PROFILE['Mobile']}"
-        self.cell(0, 5, info_text, 0, 1, 'R')
-        
-        self.ln(5)
-        self.set_draw_color(200, 200, 200)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(10)
+# 🟢 PDF Class (Lazy Import Safe & Fixed for fpdf2)
+if PDF_AVAILABLE:
+    class PDFReport(FPDF):
+        def header(self):
+            self.set_font('Arial', 'B', 10)
+            self.set_text_color(100, 100, 100)
+            self.cell(0, 5, f"{AGENT_PROFILE['Company']} ({AGENT_PROFILE['License']})", 0, 1, 'L')
+            self.set_y(10)
+            self.set_font('Arial', '', 9)
+            info_text = f"{AGENT_PROFILE['Name']} | {AGENT_PROFILE['RES_No']} | {AGENT_PROFILE['Mobile']}"
+            self.cell(0, 5, info_text, 0, 1, 'R')
+            self.ln(5)
+            self.set_draw_color(200, 200, 200)
+            self.line(10, self.get_y(), 200, self.get_y())
+            self.ln(10)
 
-    def footer(self):
-        self.set_y(-25)
-        self.set_font('Arial', 'I', 8)
-        self.set_text_color(150, 150, 150)
-        
-        # Disclaimer
-        disclaimer = "Disclaimer: This report is for reference only. Valuations are estimates based on AVM models. Data Source: URA / Huttons Analytics. Data is deemed accurate but not guaranteed."
-        self.multi_cell(0, 4, disclaimer, 0, 'C')
-        
-        # Page Number
-        self.set_y(-15)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+        def footer(self):
+            self.set_y(-25)
+            self.set_font('Arial', 'I', 8)
+            self.set_text_color(150, 150, 150)
+            disclaimer = "Disclaimer: This report is for reference only. Valuations are estimates based on AVM models. Data Source: URA / Huttons Analytics. Data is deemed accurate but not guaranteed."
+            self.multi_cell(0, 4, disclaimer, 0, 'C')
+            self.set_y(-15)
+            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
-    def add_watermark(self):
-        # Add watermark to every page
-        self.set_font('Arial', 'B', 50)
-        self.set_text_color(240, 240, 240)
-        with self.rotation(45, 105, 148):
-            self.text(30, 190, "CONFIDENTIAL")
-            self.text(40, 210, AGENT_PROFILE['Name'].upper())
+        def add_watermark(self):
+            self.set_font('Arial', 'B', 50)
+            self.set_text_color(240, 240, 240)
+            with self.rotation(45, 105, 148):
+                self.text(30, 190, "CONFIDENTIAL")
+                self.text(40, 210, AGENT_PROFILE['Name'].upper())
 
-def generate_pdf_report(project_name, unit_info, valuation_data, history_df, comps_df, data_cutoff_date):
-    pdf = PDFReport()
-    pdf.add_page()
-    pdf.add_watermark()
-    
-    # Title
-    pdf.set_font('Arial', 'B', 24)
-    pdf.set_text_color(44, 62, 80)
-    pdf.cell(0, 10, f"Valuation Report: {project_name}", 0, 1, 'C')
-    pdf.ln(5)
-    
-    # Subtitle
-    pdf.set_font('Arial', '', 14)
-    pdf.cell(0, 8, f"Unit: Block {unit_info['blk']} {unit_info['unit']}", 0, 1, 'C')
-    pdf.set_font('Arial', 'I', 10)
-    pdf.cell(0, 6, f"Date Generated: {datetime.now().strftime('%Y-%m-%d')} | Data Cutoff: {data_cutoff_date}", 0, 1, 'C')
-    pdf.ln(10)
-    
-    # Valuation Section
-    pdf.set_fill_color(240, 248, 255)
-    pdf.rect(10, pdf.get_y(), 190, 40, 'F')
-    pdf.set_y(pdf.get_y() + 5)
-    
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(60, 8, "Estimated Value", 0, 0, 'C')
-    pdf.cell(60, 8, "Area (sqft)", 0, 0, 'C')
-    pdf.cell(60, 8, "Est. PSF", 0, 1, 'C')
-    
-    pdf.set_font('Arial', 'B', 16)
-    pdf.set_text_color(39, 174, 96)
-    pdf.cell(60, 10, f"${valuation_data['value']/1e6:.2f}M", 0, 0, 'C')
-    pdf.set_text_color(0, 0, 0)
-    pdf.cell(60, 10, f"{int(valuation_data['area']):,}", 0, 0, 'C')
-    pdf.cell(60, 10, f"${int(valuation_data['psf']):,}", 0, 1, 'C')
-    
-    pdf.ln(20)
-    
-    # Tables Helper
-    def add_table(df, title):
-        pdf.set_font('Arial', 'B', 12)
+    def generate_pdf_report(project_name, unit_info, valuation_data, history_df, comps_df, data_cutoff_date):
+        pdf = PDFReport()
+        pdf.add_page()
+        pdf.add_watermark()
+        
+        pdf.set_font('Arial', 'B', 24)
         pdf.set_text_color(44, 62, 80)
-        pdf.cell(0, 8, title, 0, 1, 'L')
-        pdf.ln(2)
+        pdf.cell(0, 10, f"Valuation Report: {project_name}", 0, 1, 'C')
+        pdf.ln(5)
         
-        if df.empty:
-            pdf.set_font('Arial', 'I', 10)
-            pdf.cell(0, 8, "No records found.", 0, 1, 'L')
-            pdf.ln(5)
-            return
-
-        # Header
-        pdf.set_font('Arial', 'B', 9)
-        pdf.set_fill_color(220, 220, 220)
-        col_widths = [30, 25, 30, 25, 30, 30] 
-        headers = ['Date', 'Unit', 'Price ($)', 'PSF ($)', 'Area', 'Type']
-        
-        for i, h in enumerate(headers):
-            pdf.cell(col_widths[i], 8, h, 1, 0, 'C', True)
-        pdf.ln()
-        
-        # Rows
-        pdf.set_font('Arial', '', 9)
-        pdf.set_fill_color(255, 255, 255)
-        
-        for _, row in df.iterrows():
-            date_str = row['Sale Date'].strftime('%Y-%m-%d')
-            price_str = f"{row['Sale Price']:,.0f}" if pd.notnull(row['Sale Price']) else "-"
-            psf_str = f"{row['Sale PSF']:,.0f}" if pd.notnull(row['Sale PSF']) else "-"
-            area_str = f"{int(row['Area (sqft)']):,}" if pd.notnull(row['Area (sqft)']) else "-"
-            
-            # Smart Unit display
-            unit_str = row['Unit'] if 'Unit' in row else f"#{int(row.get('Floor_Num',0)):02d}-{row.get('Stack','?')}"
-            cat_str = str(row.get('Category', '-'))[:10]
-
-            data = [date_str, unit_str, price_str, psf_str, area_str, cat_str]
-            
-            for i, d in enumerate(data):
-                pdf.cell(col_widths[i], 8, str(d), 1, 0, 'C')
-            pdf.ln()
+        pdf.set_font('Arial', '', 14)
+        pdf.cell(0, 8, f"Unit: Block {unit_info['blk']} {unit_info['unit']}", 0, 1, 'C')
+        pdf.set_font('Arial', 'I', 10)
+        pdf.cell(0, 6, f"Date Generated: {datetime.now().strftime('%Y-%m-%d')} | Data Cutoff: {data_cutoff_date}", 0, 1, 'C')
         pdf.ln(10)
+        
+        pdf.set_fill_color(240, 248, 255)
+        pdf.rect(10, pdf.get_y(), 190, 40, 'F')
+        pdf.set_y(pdf.get_y() + 5)
+        
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(60, 8, "Estimated Value", 0, 0, 'C')
+        pdf.cell(60, 8, "Area (sqft)", 0, 0, 'C')
+        pdf.cell(60, 8, "Est. PSF", 0, 1, 'C')
+        
+        pdf.set_font('Arial', 'B', 16)
+        pdf.set_text_color(39, 174, 96)
+        pdf.cell(60, 10, f"${valuation_data['value']/1e6:.2f}M", 0, 0, 'C')
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(60, 10, f"{int(valuation_data['area']):,}", 0, 0, 'C')
+        pdf.cell(60, 10, f"${int(valuation_data['psf']):,}", 0, 1, 'C')
+        pdf.ln(20)
+        
+        def add_table(df, title):
+            pdf.set_font('Arial', 'B', 12)
+            pdf.set_text_color(44, 62, 80)
+            pdf.cell(0, 8, title, 0, 1, 'L')
+            pdf.ln(2)
+            
+            if df.empty:
+                pdf.set_font('Arial', 'I', 10)
+                pdf.cell(0, 8, "No records found.", 0, 1, 'L')
+                pdf.ln(5)
+                return
 
-    # Add History Table
-    add_table(history_df.head(10), "Unit Transaction History")
-    
-    # Add Comps Table
-    add_table(comps_df.head(10), "Comparable Transactions (Valuation Basis)")
-    
-    return pdf.output(dest='S').encode('latin-1')
+            pdf.set_font('Arial', 'B', 9)
+            pdf.set_fill_color(220, 220, 220)
+            col_widths = [30, 25, 30, 25, 30, 30] 
+            headers = ['Date', 'Unit', 'Price ($)', 'PSF ($)', 'Area', 'Type']
+            
+            for i, h in enumerate(headers):
+                pdf.cell(col_widths[i], 8, h, 1, 0, 'C', True)
+            pdf.ln()
+            
+            pdf.set_font('Arial', '', 9)
+            pdf.set_fill_color(255, 255, 255)
+            
+            for _, row in df.iterrows():
+                date_str = row['Sale Date'].strftime('%Y-%m-%d')
+                price_str = f"{row['Sale Price']:,.0f}" if pd.notnull(row['Sale Price']) else "-"
+                psf_str = f"{row['Sale PSF']:,.0f}" if pd.notnull(row['Sale PSF']) else "-"
+                area_str = f"{int(row['Area (sqft)']):,}" if pd.notnull(row['Area (sqft)']) else "-"
+                unit_str = row['Unit'] if 'Unit' in row else f"#{int(row.get('Floor_Num',0)):02d}-{row.get('Stack','?')}"
+                cat_str = str(row.get('Category', '-'))[:10]
+
+                data = [date_str, unit_str, price_str, psf_str, area_str, cat_str]
+                for i, d in enumerate(data):
+                    pdf.cell(col_widths[i], 8, str(d), 1, 0, 'C')
+                pdf.ln()
+            pdf.ln(10)
+
+        add_table(history_df.head(10), "Unit Transaction History")
+        add_table(comps_df.head(10), "Comparable Transactions")
+        
+        # 🟢 V47 修复: fpdf2 默认返回二进制，无需 encode
+        return pdf.output()
 
 # ==========================================
 # 🎨 4. 侧边栏与主界面逻辑
@@ -755,7 +732,7 @@ if df is not None:
                         ))
 
                     fig_tower.update_layout(
-                        title=dict(text=f"Block {selected_blk} - 物理透视图 (SSD: 🟢Free 🟡<6m 🔴Locked)", x=0.5),
+                        title=dict(text=f"Block {selected_blk} - 物理透视图 (SSD 状态灯: 🟢Free 🟡<6m 🔴Locked)", x=0.5),
                         xaxis=dict(title="Stack", type='category', side='bottom'),
                         yaxis=dict(title="Floor", type='category', categoryorder='array', categoryarray=y_category_order, dtick=1),
                         plot_bgcolor='white', height=max(400, len(y_category_order) * 35), 
@@ -767,7 +744,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v45_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v46_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -857,6 +834,7 @@ if df is not None:
                         gain_color = "normal" if net_gain > 0 else "inverse"
                         
                         m4.metric("🚀 预估净增值 (Net Gain)", f"${net_gain/1e6:.2f}M", f"{net_gain_pct:+.1%}", delta_color=gain_color)
+                        
                         if ssd_rate > 0: st.caption(f"⚠️ {ssd_text}: 扣除印花税 ${ssd_cost/1e6:.2f}M")
                         else: st.caption(f"✅ SSD Free: 无需扣除")
                     else:
@@ -901,20 +879,22 @@ if df is not None:
                     fig_range.update_layout(font=dict(size=chart_font_size))
                     st.plotly_chart(fig_range, use_container_width=True)
                     
-                    # 🟢 生成 PDF 按钮
-                    unit_info = {'blk': sel_blk, 'unit': unit_label}
-                    valuation_data = {'value': value, 'area': area, 'psf': int(est_psf)}
-                    data_cutoff_date = df['Sale Date'].max().strftime('%Y-%m-%d')
-                    
-                    pdf_bytes = generate_pdf_report(project_name, unit_info, valuation_data, history_unit, comps_df, data_cutoff_date)
-                    
-                    st.download_button(
-                        label="📥 下载 PDF 估值报告 (Professional Report)",
-                        data=pdf_bytes,
-                        file_name=f"Valuation_{sel_blk}_{unit_label}.pdf",
-                        mime='application/pdf',
-                        type="primary"
-                    )
+                    if PDF_AVAILABLE:
+                        data_cutoff_date = df['Sale Date'].max().strftime('%Y-%m-%d')
+                        unit_info = {'blk': sel_blk, 'unit': unit_label}
+                        valuation_data = {'value': value, 'area': area, 'psf': int(est_psf)}
+                        
+                        pdf_bytes = generate_pdf_report(project_name, unit_info, valuation_data, history_unit, comps_df, data_cutoff_date)
+                        
+                        st.download_button(
+                            label="📥 下载 PDF 估值报告 (Professional Report)",
+                            data=pdf_bytes,
+                            file_name=f"Valuation_{sel_blk}_{unit_label}.pdf",
+                            mime='application/pdf',
+                            type="primary"
+                        )
+                    else:
+                        st.warning("⚠️ 生成 PDF 功能不可用。请在 requirements.txt 中添加 'fpdf2'。")
                     
                     st.divider()
                     
