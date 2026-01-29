@@ -1,4 +1,4 @@
-# utils.py
+# 文件名: utils.py
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -6,7 +6,7 @@ from dateutil.relativedelta import relativedelta
 import re
 import streamlit as st
 
-# ==================== 1. 个人品牌配置 ====================
+# ==================== 1. 个人品牌配置 (PDF生成需要) ====================
 AGENT_PROFILE = {
     "Name": "Henry GUO",
     "Title": "Associate District Director",
@@ -17,18 +17,16 @@ AGENT_PROFILE = {
     "Email": "henry.guo@huttons.com"
 }
 
-# ==================== 2. 项目列表配置 (补回漏掉的部分) ====================
+# ==================== 2. 项目列表配置 (修复报错的关键) ====================
 try:
     # 尝试从 secrets 读取配置
     project_config = dict(st.secrets["projects"])
     PROJECTS = {"📂 手动上传 CSV": None}
     PROJECTS.update(project_config)
 except:
-    # 如果没有 secrets，使用默认值
+    # 如果没有 secrets，使用默认值，防止报错
     PROJECTS = {
         "📂 手动上传 CSV": None,
-        # 您可以在这里硬编码添加项目，例如：
-        # "🏢 Braddell View": "https://docs.google.com/spreadsheets/d/...", 
     }
 
 # ==================== 3. 基础工具函数 ====================
@@ -45,7 +43,6 @@ def load_data(file_or_url):
     try:
         if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
         try:
-            # 尝试自动探测表头
             df_temp = pd.read_csv(file_or_url, header=None, nrows=20)
             header_row = -1
             for i, row in df_temp.iterrows():
@@ -68,6 +65,7 @@ def load_data(file_or_url):
         if 'Sale Date' in df.columns:
             df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
+            # 这里的 Date_Ordinal 用于 V42 稳健回归算法
             df['Date_Ordinal'] = df['Sale Date'].map(datetime.toordinal)
             df['Quarter'] = df['Sale Date'].dt.to_period('Q')
 
@@ -127,7 +125,7 @@ def mark_penthouse(df):
         return row['Area (sqft)'] > (med * 1.4)
     return df.apply(check, axis=1)
 
-# ==================== 4. AVM 核心逻辑 ====================
+# ==================== 4. 业务逻辑算法 ====================
 
 def estimate_inventory(df, category_col='Category'):
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
@@ -216,8 +214,11 @@ def get_dynamic_floor_premium(df, category):
     else:
         return 0.005
 
+# 🟢 V44 核心: 智能 SSD 判定 (含2025新政)
 def calculate_ssd_status(purchase_date):
-    """SSD 2025 Policy"""
+    """
+    计算 SSD 状态 (支持 2025年7月4日 新政)
+    """
     now = datetime.now()
     purchase_dt = pd.to_datetime(purchase_date)
     NEW_POLICY_DATE = datetime(2025, 7, 4)
@@ -233,16 +234,14 @@ def calculate_ssd_status(purchase_date):
         ssd_deadline = purchase_dt + relativedelta(years=4)
         remaining_days = (ssd_deadline - now).days
         
-        if held_years < 1:
-            rate = 0.16; emoji = "🔴"; status_text = "SSD 16%"
-        elif held_years < 2:
-            rate = 0.12; emoji = "🔴"; status_text = "SSD 12%"
-        elif held_years < 3:
-            rate = 0.08; emoji = "🔴"; status_text = "SSD 8%"
+        if held_years < 1: rate, emoji, status_text = 0.16, "🔴", "SSD 16%"
+        elif held_years < 2: rate, emoji, status_text = 0.12, "🔴", "SSD 12%"
+        elif held_years < 3: rate, emoji, status_text = 0.08, "🔴", "SSD 8%"
         elif held_years < 4:
             rate = 0.04
             if remaining_days <= 180: emoji, status_text = "🟡", "SSD 4% (<6m)"
             else: emoji, status_text = "🔴", "SSD 4%"
+            
     elif purchase_dt >= datetime(2017, 3, 11):
         ssd_deadline = purchase_dt + relativedelta(years=3)
         remaining_days = (ssd_deadline - now).days
@@ -256,6 +255,7 @@ def calculate_ssd_status(purchase_date):
     
     return rate, emoji, status_text
 
+# 🟢 V42 核心: 稳健回归模型 (使用 numpy，无 sklearn 依赖)
 def get_market_trend_model(df):
     df_clean = df.dropna(subset=['Sale PSF', 'Date_Ordinal']).copy()
     if len(df_clean) < 10: return None, 0 
@@ -267,7 +267,7 @@ def get_market_trend_model(df):
     x = df_clean['Date_Ordinal'].values
     y = df_clean['Sale PSF'].values
     
-    # 1次多项式拟合 (Numpy Polyfit)
+    # 1次多项式拟合
     coeffs = np.polyfit(x, y, 1) 
     trend_func = np.poly1d(coeffs)
     
@@ -278,6 +278,7 @@ def get_market_trend_model(df):
     
     return trend_func, r2
 
+# 🟢 V49 核心: AVM 估值 (适配 PDF 输出)
 def calculate_avm(df, blk, stack, floor):
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
@@ -314,22 +315,19 @@ def calculate_avm(df, blk, stack, floor):
     if comps.empty:
         return subject_area, 0, 0, 0, 0.005, pd.DataFrame(), subject_cat
 
+    # 时间修正
     trend_func, r2 = get_market_trend_model(df)
     current_date_ordinal = last_date.toordinal()
-    
     use_trend = trend_func is not None and r2 > 0.1
     
     def adjust_psf(row):
         if not use_trend: return row['Sale PSF']
-        
         sale_ordinal = row['Sale Date'].toordinal()
         pred_then = trend_func(sale_ordinal)
         pred_now = trend_func(current_date_ordinal)
-        
         if pred_then <= 0: return row['Sale PSF']
-        
         ratio = pred_now / pred_then
-        ratio = max(0.8, min(1.2, ratio))
+        ratio = max(0.8, min(1.2, ratio)) # 钳制修正幅度
         return row['Sale PSF'] * ratio
 
     comps['Adj_PSF'] = comps.apply(adjust_psf, axis=1)
@@ -343,6 +341,7 @@ def calculate_avm(df, blk, stack, floor):
     model_psf = base_psf * adjustment_factor
     
     final_psf = model_psf
+    # 自身历史修正 (3年内)
     if last_price_psf is not None:
         years_since_tx = (last_date - last_tx_date).days / 365.25
         if years_since_tx < 3: 
