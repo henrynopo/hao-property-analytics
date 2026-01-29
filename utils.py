@@ -27,6 +27,8 @@ except:
     # 如果没有 secrets，使用默认值，防止报错
     PROJECTS = {
         "📂 手动上传 CSV": None,
+        # 👇 在这里把您的项目名和链接加回去
+        "🏢 Braddell View": "https://drive.google.com/uc?id=您的文件ID&export=download", 
     }
 
 # ==================== 3. 基础工具函数 ====================
