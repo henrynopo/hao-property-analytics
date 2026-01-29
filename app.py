@@ -1,6 +1,5 @@
 # app.py
 import streamlit as st
-# 🟢 确保这里的导入包含了 utils.py 中定义的所有函数
 from utils import PROJECTS, load_data, auto_categorize, estimate_inventory, natural_key, mark_penthouse
 import tab1_market
 import tab2_tower
@@ -32,11 +31,11 @@ with st.sidebar:
 
     if df is not None:
         cat_ops = ["按户型面积段 (自动分箱)", "按楼座 (Block)"]
-        # 🟢 修复重复选项：只添加一次卧室选项
+        # 避免重复添加
+        has_bedroom = False
         for c in ['Bedroom Type', 'Bedrooms', 'Type']:
-            if c in df.columns: 
-                cat_ops.insert(0, "按卧室数量 (Bedroom Type)")
-                break
+            if c in df.columns: has_bedroom = True; break
+        if has_bedroom: cat_ops.insert(0, "按卧室数量 (Bedroom Type)")
         
         category_method = st.selectbox("分类依据", cat_ops, index=0)
         inventory_mode = st.radio("库存计算模式", ["🤖 自动推定 (V11智能版)", "🖐 手动输入"], index=0)
@@ -49,21 +48,45 @@ with st.sidebar:
 
 # ==================== 主界面 ====================
 if df is not None:
+    # 1. 基础处理
     df['Category'] = auto_categorize(df, category_method)
-    # 🟢 关键修复：先生成 Is_Special 列，防止后续库存计算报错
     df['Is_Special'] = mark_penthouse(df)
 
-    inventory_map = {}
+    # 2. 库存数据准备
     unique_cats = sorted(df['Category'].unique(), key=natural_key)
+    inventory_map = {}
     
-    # 🟢 修复 UI：恢复库存输入框
+    # 🟢 核心修复: 确保推定数据只计算一次，且变量名清晰
+    estimated_counts = {}
+    if inventory_mode.startswith("🤖") and 'Stack' in df.columns:
+        with st.spinner("正在智能推算全盘库存..."):
+            estimated_counts = estimate_inventory(df, 'Category')
+
+    # 3. 渲染侧边栏输入框 (数据回填)
     with inventory_container:
+        st.write("---") 
+        st.caption(f"📊 各分类总库存设定 ({len(unique_cats)} 类)")
         cols = st.columns(2)
+        
         for i, cat in enumerate(unique_cats):
+            # 🟢 逻辑修复: 优先取推定值，取不到则默认100
+            if inventory_mode.startswith("🤖"):
+                default_val = int(estimated_counts.get(cat, 100))
+                # 再次兜底，防止算出0或负数
+                if default_val < 1: default_val = 1
+            else:
+                default_val = 100 
+            
             with cols[i % 2]:
-                val = st.number_input(f"[{cat}]", value=100, min_value=1, key=f"inv_{i}")
+                val = st.number_input(
+                    f"[{cat}]", 
+                    value=default_val, 
+                    min_value=1, 
+                    key=f"inv_input_{i}_{category_method}" # 增加 key 的唯一性，防止切换分类时报错
+                )
                 inventory_map[cat] = val
 
+    # 4. 渲染主界面 Tabs
     st.title(f"🏙️ {project_name} 市场透视")
     st.caption(f"数据范围: {df['Sale Date'].min().date()} 至 {df['Sale Date'].max().date()} | 总交易: {len(df)} 宗")
 
