@@ -259,17 +259,36 @@ def calculate_avm(df, blk, stack, floor):
     return subject_area, estimated_psf, valuation, floor_diff, premium_rate, comps_display
 
 def calculate_resale_metrics(df):
-    """📊 计算转售利润"""
+    """
+    📊 计算转售利润 
+    (严格排除 New Sale 作为卖出点，New Sale 只能是买入起点)
+    """
     if 'Unit_ID' not in df.columns: return pd.DataFrame()
+    
     df_sorted = df.sort_values(['Unit_ID', 'Sale Date'])
     df_sorted['Prev_Price'] = df_sorted.groupby('Unit_ID')['Sale Price'].shift(1)
     df_sorted['Prev_Date'] = df_sorted.groupby('Unit_ID')['Sale Date'].shift(1)
+    
     resales = df_sorted.dropna(subset=['Prev_Price']).copy()
+    
+    sale_type_col = None
+    for col in df.columns:
+        if 'Type of Sale' in col or 'Sale Type' in col:
+            sale_type_col = col
+            break
+            
+    if sale_type_col:
+        valid_types = ['Resale', 'Sub Sale', 'Resales', 'Subsales']
+        mask = resales[sale_type_col].astype(str).str.strip().apply(lambda x: any(t.lower() in x.lower() for t in valid_types))
+        resales = resales[mask]
+    
     if resales.empty: return pd.DataFrame()
+    
     resales['Gain'] = resales['Sale Price'] - resales['Prev_Price']
     resales['Hold_Days'] = (resales['Sale Date'] - resales['Prev_Date']).dt.days
     resales['Hold_Years'] = resales['Hold_Days'] / 365.25
     resales['Annualized'] = (resales['Sale Price'] / resales['Prev_Price']) ** (1 / resales['Hold_Years'].replace(0, 0.01)) - 1
+    
     return resales
 
 # ==========================================
@@ -440,7 +459,7 @@ if df is not None:
                 "Avg Annualized": st.column_config.NumberColumn("平均年化", format="%.2%"),
             })
         else:
-            st.info("暂未发现转售记录。")
+            st.info("暂未发现转售记录 (需至少有2笔历史交易，且最新一笔不为 New Sale)。")
 
     # --- Tab 2: 楼宇透视 ---
     with tab2:
@@ -520,7 +539,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v26_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v28_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -546,6 +565,7 @@ if df is not None:
         c_sel_1, c_sel_2, c_sel_3 = st.columns(3)
         def_blk_idx, def_stack_idx, def_floor_val = 0, 0, 1
         
+        # 🟢 严格应用 Natural Sort
         all_blks = sorted(df['BLK'].unique(), key=natural_key) if 'BLK' in df.columns else []
         current_target = st.session_state.get('avm_target', {})
         if current_target and current_target.get('blk') in all_blks:
@@ -556,6 +576,7 @@ if df is not None:
         
         if sel_blk:
             blk_df = df[df['BLK'] == sel_blk]
+            # 🟢 严格应用 Natural Sort (Stack)
             all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else []
             
             if current_target.get('blk') == sel_blk and str(current_target.get('stack')) in [str(s) for s in all_stacks]:
@@ -618,7 +639,7 @@ if df is not None:
                         textposition="top center", showlegend=False, hoverinfo='x'
                     ))
                     fig_range.update_layout(
-                        title=dict(text="⚖️ 估值区间 (Price Range)", x=0.5, y=0.9),
+                        title=dict(text="⚖️ 估值区间 (Price Range)", x=0.5, xanchor='center', y=0.9),
                         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[val_low*0.9, val_high*1.1]),
                         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-0.5, 0.8]),
                         height=180, margin=dict(l=20, r=20, t=40, b=10),
@@ -628,8 +649,6 @@ if df is not None:
                     st.plotly_chart(fig_range, use_container_width=True)
                     
                     c_info1, c_info2 = st.columns(2)
-                    
-                    # 🟢 货币格式: $%,d (带逗号)
                     currency_fmt = st.column_config.NumberColumn(format="$%,d")
                     
                     with c_info1:
@@ -675,7 +694,7 @@ if df is not None:
                 bed_col = c
                 break
         
-        # 🟢 格式化显示
+        # 🟢 格式化显示 (带千位符)
         show_cols = ['Sale Date', 'BLK', 'Unit', bed_col, 'Area (sqft)', 'Sale Price', 'Sale PSF']
         
         st.dataframe(
