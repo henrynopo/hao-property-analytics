@@ -1,4 +1,4 @@
-# tab3_avm.py
+# 文件名: tab3_avm.py
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -6,155 +6,96 @@ from utils import calculate_avm, calculate_ssd_status, natural_key
 from pdf_gen import generate_pdf_report, PDF_AVAILABLE
 
 def render(df, project_name, chart_font_size):
-    # 🟢 V81 标志：如果您看到这个标题，说明代码更新成功了！
-    st.markdown("### ✅ 单元智能估值 (AVM) V81 - 修复版")
+    st.subheader("💎 单元智能估值 (AVM) V81")
 
-    # --- 1. 防止布局跳动 (Session State) ---
-    if 'avm_result' not in st.session_state:
-        st.session_state.avm_result = None
+    # 1. 状态锁定
+    if 'avm_res' not in st.session_state: st.session_state.avm_res = None
 
-    # --- 2. 自动定位 ---
-    target_blk, target_floor, target_stack = None, None, None
+    # 2. 自动定位
+    t_blk, t_flr, t_stk = None, None, None
     if 'avm_target' in st.session_state:
-        tgt = st.session_state['avm_target']
-        target_blk, target_floor, target_stack = tgt['blk'], tgt['floor'], tgt['stack']
-        st.success(f"📍 已定位: {target_blk} #{target_floor}-{target_stack}")
+        t = st.session_state['avm_target']
+        t_blk, t_flr, t_stk = t['blk'], t['floor'], t['stack']
+        st.success(f"📍 定位: {t_blk} #{t_flr}-{t_stk}")
         del st.session_state['avm_target']
 
-    # --- 3. 输入区 (Block > Floor > Stack) ---
+    # 3. 输入区
     c1, c2, c3 = st.columns(3)
-    
     with c1:
-        # Block 自然排序
         blks = sorted(df['BLK'].unique(), key=natural_key)
-        b_idx = blks.index(target_blk) if target_blk in blks else 0
-        s_blk = st.selectbox("1. 楼座 (Block)", blks, index=b_idx, key="avm_blk_v81")
-
+        b_idx = blks.index(t_blk) if t_blk in blks else 0
+        s_blk = st.selectbox("1. 楼座", blks, index=b_idx, key="blk_v82")
+    
     with c2:
-        # Floor 下拉菜单
         blk_df = df[df['BLK'] == s_blk]
-        if 'Floor_Num' in blk_df.columns:
-            valid_floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
-        else:
-            valid_floors = [1]
-        if not valid_floors: valid_floors = [1]
+        floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int)) if 'Floor_Num' in blk_df.columns else [1]
+        if not floors: floors = [1]
+        f_idx = floors.index(t_flr) if t_flr in floors else len(floors)//2
+        s_flr = st.selectbox("2. 楼层", floors, index=f_idx, key="flr_v82")
         
-        f_idx = valid_floors.index(target_floor) if target_floor in valid_floors else len(valid_floors)//2
-        s_floor = st.selectbox("2. 楼层 (Floor)", valid_floors, index=f_idx, key="avm_floor_v81")
-
     with c3:
-        # Stack 智能筛选
-        relevant_stacks = sorted(blk_df[blk_df['Floor_Num'] == s_floor]['Stack'].unique(), key=natural_key)
-        if not relevant_stacks:
-            relevant_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
-        if not relevant_stacks: relevant_stacks = ['Unknown']
-        
-        s_idx = relevant_stacks.index(target_stack) if target_stack in relevant_stacks else 0
-        s_stack = st.selectbox("3. 单元 (Stack)", relevant_stacks, index=s_idx, key="avm_stack_v81")
+        stacks = sorted(blk_df[blk_df['Floor_Num']==s_flr]['Stack'].unique(), key=natural_key)
+        if not stacks: stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
+        if not stacks: stacks = ['Unknown']
+        s_idx = stacks.index(t_stk) if t_stk in stacks else 0
+        s_stk = st.selectbox("3. 单元", stacks, index=s_idx, key="stk_v82")
 
-    # --- 4. 触发计算 ---
+    # 4. 计算
     if st.button("🚀 开始估值", type="primary", use_container_width=True):
-        area, val_psf, valuation, floor_diff, prem_rate, comps_df, subject_cat = calculate_avm(df, s_blk, s_stack, s_floor)
-        
-        if area is None:
-            st.error("❌ 数据不足，无法估值")
-            st.session_state.avm_result = None
+        area, psf, val, _, _, comps, _ = calculate_avm(df, s_blk, s_stk, s_flr)
+        if area:
+            st.session_state.avm_res = {'area':area, 'psf':psf, 'val':val, 'blk':s_blk, 'stk':s_stk, 'flr':s_flr, 'comps':comps}
         else:
-            # 存入 Session State 锁定结果
-            st.session_state.avm_result = {
-                'area': area, 'val_psf': val_psf, 'valuation': valuation,
-                's_blk': s_blk, 's_stack': s_stack, 's_floor': s_floor,
-                'comps_df': comps_df
-            }
+            st.error("数据不足"); st.session_state.avm_res = None
 
-    # --- 5. 结果渲染 ---
-    if st.session_state.avm_result is not None:
-        res = st.session_state.avm_result
+    # 5. 显示
+    if st.session_state.avm_res:
+        res = st.session_state.avm_res
+        val = res['val']
         
-        # 解包
-        area = res['area']
-        valuation = res['valuation']
-        val_psf = res['val_psf']
-        curr_blk, curr_stack, curr_floor = res['s_blk'], res['s_stack'], res['s_floor']
-        comps_df = res['comps_df']
-
-        # 获取历史数据
-        hist_df = df[(df['BLK'] == curr_blk) & (df['Stack'] == curr_stack) & (df['Floor_Num'] == curr_floor)].sort_values('Sale Date')
-        
-        # 计算
-        last_price, net_gain, ssd_cost = 0, 0, 0
-        if not hist_df.empty:
-            last_tx = hist_df.iloc[-1]
-            last_price = last_tx['Sale Price']
-            last_date = last_tx['Sale Date']
-            ssd_rate, _, ssd_text = calculate_ssd_status(last_date)
-            ssd_cost = valuation * ssd_rate
-            net_gain = valuation - last_price - ssd_cost
-        else:
-            ssd_rate, _, ssd_text = 0, "", ""
+        # 历史数据获取
+        hist = df[(df['BLK']==res['blk']) & (df['Stack']==res['stk']) & (df['Floor_Num']==res['flr'])].sort_values('Sale Date')
+        last_p, gain, ssd = 0, 0, 0
+        if not hist.empty:
+            last = hist.iloc[-1]
+            last_p = last['Sale Price']
+            ssd_rate, _, ssd_txt = calculate_ssd_status(last['Sale Date'])
+            ssd = val * ssd_rate
+            gain = val - last_p - ssd
 
         st.markdown("---")
-        
-        # [A] 核心指标
-        m1, m2, m3 = st.columns(3)
-        m1.metric("预估总价", f"${valuation/1e6:.2f}M", delta=f"{net_gain/1e6:+.2f}M" if last_price else None)
-        m2.metric("预估尺价", f"${val_psf:,.0f} psf")
-        m3.metric("单位面积", f"{int(area):,} sqft")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("估值", f"${val/1e6:.2f}M", delta=f"{gain/1e6:+.2f}M" if last_p else None)
+        k2.metric("尺价", f"${res['psf']:,.0f} psf")
+        k3.metric("面积", f"{int(res['area']):,} sqft")
 
-        # [B] 仪表盘 (深蓝指针, 无红线)
-        fig = go.Figure(go.Indicator(
-            mode="number+gauge", value=valuation,
-            number={'prefix': "$", 'valueformat': ",.0f"},
-            gauge={
-                'axis': {'range': [valuation*0.85, valuation*1.15]},
-                'bar': {'color': "#1f77b4"},
-                'steps': [
-                    {'range': [valuation*0.85, valuation*0.95], 'color': "#f0f2f6"},
-                    {'range': [valuation*0.95, valuation*1.05], 'color': "#cbf3f0"},
-                    {'range': [valuation*1.05, valuation*1.15], 'color': "#f0f2f6"}
-                ]
-            }
-        ))
-        fig.update_layout(height=120, margin=dict(t=30, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+        # 仪表盘
+        fig = go.Figure(go.Indicator(mode="number+gauge", value=val, number={'prefix':"$",'valueformat':",.0f"},
+            gauge={'axis':{'range':[val*0.85, val*1.15]}, 'bar':{'color':"#1f77b4"}, 
+                   'steps':[{'range':[val*0.85, val*0.95], 'color':"#f2f2f2"},{'range':[val*0.95, val*1.05], 'color':"#cbf3f0"},{'range':[val*1.05, val*1.15], 'color':"#f2f2f2"}]}))
+        fig.update_layout(height=120, margin=dict(t=20, b=20)); st.plotly_chart(fig, use_container_width=True)
 
-        # [C] 历史成交 (在上)
-        st.subheader("📜 本单位历史 (History)")
-        if not hist_df.empty:
-            # 🟢 防崩关键：只显示存在的列，绝对不报 KeyError
-            possible_cols = ['Sale Date', 'Sale Price', 'Sale PSF', 'Type of Sale']
-            actual_cols = [c for c in possible_cols if c in hist_df.columns]
-            
-            st.dataframe(
-                hist_df[actual_cols].style.format({'Sale Price': "${:,.0f}", 'Sale PSF': "${:,.0f}"}), 
-                use_container_width=True
-            )
-            
-            if ssd_rate > 0: st.warning(f"⚠️ 需付 SSD: {ssd_text}")
-            else: st.success("✅ SSD Free")
-        else:
-            st.info("无历史记录")
+        # 历史 (防崩)
+        st.subheader("📜 本单位历史")
+        if not hist.empty:
+            cols = [c for c in ['Sale Date','Sale Price','Sale PSF','Type of Sale'] if c in hist.columns]
+            st.dataframe(hist[cols].style.format({'Sale Price':"${:,.0f}",'Sale PSF':"${:,.0f}"}), use_container_width=True)
+            if ssd > 0: st.warning(f"SSD: {ssd_txt}")
+            else: st.success("SSD Free")
+        else: st.info("无记录")
 
-        # [D] 周边成交 (在下)
-        st.subheader("📉 周边参考 (Comps)")
-        comp_possible = ['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']
-        comp_actual = [c for c in comp_possible if c in comps_df.columns]
-        
-        st.dataframe(
-            comps_df[comp_actual].style.format({'Sale Price': "${:,.0f}", 'Sale PSF': "${:,.0f}", 'Area (sqft)': "{:,.0f}"}), 
-            use_container_width=True
-        )
+        # 周边
+        st.subheader("📉 周边参考")
+        ccols = [c for c in ['Sale Date','Unit','Sale Price','Sale PSF','Area (sqft)'] if c in res['comps'].columns]
+        st.dataframe(res['comps'][ccols].style.format({'Sale Price':"${:,.0f}",'Sale PSF':"${:,.0f}",'Area (sqft)':"{:,.0f}"}), use_container_width=True)
 
-        # [E] PDF 下载
+        # PDF
         st.markdown("---")
         if PDF_AVAILABLE:
-            u_info = {'blk': curr_blk, 'unit': f"{curr_floor:02d}-{curr_stack}"}
-            v_data = {'value': valuation, 'area': area, 'psf': val_psf}
-            a_data = {'net_gain': net_gain, 'ssd_cost': ssd_cost, 'last_price': last_price}
-            d_cut = df['Sale Date'].max().strftime('%Y-%m-%d')
-            
+            u_info = {'blk':res['blk'], 'unit':f"{res['flr']:02d}-{res['stk']}"}
+            v_data = {'value':val, 'area':res['area'], 'psf':res['psf']}
+            a_data = {'net_gain':gain, 'ssd_cost':ssd, 'last_price':last_p}
             try:
-                pdf = generate_pdf_report(project_name, u_info, v_data, a_data, hist_df, comps_df, d_cut)
-                st.download_button("📄 下载 PDF 信函", data=pdf, file_name=f"Valuation.pdf", mime="application/pdf", type="primary", use_container_width=True)
-            except Exception as e:
-                st.warning(f"PDF生成不可用: {e}")
+                pdf = generate_pdf_report(project_name, u_info, v_data, a_data, hist, res['comps'], df['Sale Date'].max().strftime('%Y-%m-%d'))
+                st.download_button("📥 下载PDF", data=pdf, file_name="Valuation.pdf", mime="application/pdf", type="primary", use_container_width=True)
+            except Exception as e: st.warning(f"PDF生成失败: {e}")
