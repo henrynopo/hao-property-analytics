@@ -94,49 +94,61 @@ def mark_penthouse(df):
     medians = df.groupby('Category')['Area (sqft)'].median()
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
-# 🟢 V65 核心: 奇偶校验步长检测器
+# 🟢 V66 核心: 堆叠投票检测器 (Stack Voting Step Detector)
 def detect_block_step(blk_df):
-    floors = sorted(blk_df['Floor_Num'].dropna().unique())
-    if not floors: return 1
+    # 1. 如果没有数据，默认平层
+    if blk_df.empty: return 1
     
-    # 证据 1: 奇偶性纯度 (Parity Purity)
-    # Maisonette 通常只在 1, 3, 5 或 2, 4, 6 交易
-    has_odd = any(f % 2 != 0 for f in floors)
-    has_even = any(f % 2 == 0 for f in floors)
-    is_pure_parity = not (has_odd and has_even) # 要么全奇，要么全偶
+    unique_stacks = blk_df['Stack'].unique()
+    if len(unique_stacks) == 0: return 1
     
-    avg_area = blk_df['Area (sqft)'].median() if 'Area (sqft)' in blk_df.columns else 0
+    # 投票箱
+    votes_simplex = 0  # 平层票数
+    votes_maisonette = 0 # 复式票数
     
-    # 如果是纯奇数/纯偶数，且户型较大 (>1500sf)
-    # 这几乎百分百是复式 (10J, 10K 符合此特征)
-    if is_pure_parity and avg_area > 1500:
+    for stack in unique_stacks:
+        stack_df = blk_df[blk_df['Stack'] == stack]
+        floors = sorted(stack_df['Floor_Num'].dropna().unique())
+        
+        if len(floors) < 2: continue # 数据太少，弃权
+        
+        # 检查单列的纯度 (Purity)
+        has_odd = any(f % 2 != 0 for f in floors)
+        has_even = any(f % 2 == 0 for f in floors)
+        
+        # 如果这一列要么全是单数，要么全是双数 -> 投给复式
+        if (has_odd and not has_even) or (not has_odd and has_even):
+            votes_maisonette += 1
+        else:
+            # 如果单双混杂 -> 投给平层
+            votes_simplex += 1
+            
+    # 2. 计票
+    # 如果复式票数多于平层，且复式票数 > 0，则判定为复式楼
+    if votes_maisonette > votes_simplex:
         return 2
+    else:
+        return 1
 
-    # 证据 2: 间距检测 (Gap Detection)
-    # 适用于数据较多，可能有一两个噪音数据的情况
-    if len(floors) >= 2:
-        diffs = np.diff(floors)
-        # 统计间距为 2 的数量
-        count_2 = np.sum(diffs == 2)
-        # 统计间距为 1 的数量
-        count_1 = np.sum(diffs == 1)
-        
-        # 如果大部分间距是 2，那就是复式
-        if count_2 > count_1: 
-            return 2
-        
-    # 证据 3: 密度比率 (Density Ratio) - 用于高层数据
-    # 防止因为数据极其稀疏导致的误判
-    min_f, max_f = min(floors), max(floors)
-    physical_height = max_f - min_f + 1
-    unique_units = blk_df['Unit_ID'].nunique()
-    unique_stacks = blk_df['Stack'].nunique()
+# 🟢 V66 辅助: 智能判定单列起始层 (Smart Stack Start)
+def get_stack_start_floor(stack_df, block_min_f, step):
+    if step == 1: 
+        return block_min_f
     
-    if unique_stacks > 0 and physical_height > 6:
-        density = (unique_units / unique_stacks) / physical_height
-        if 0.35 <= density <= 0.65: return 2
-
-    return 1
+    # 如果是复式，我们需要判断这一列是 "单数入口" 还是 "双数入口"
+    floors = sorted(stack_df['Floor_Num'].dropna().unique())
+    if not floors: return block_min_f
+    
+    # 统计这一列大部分是单数还是双数
+    odd_count = sum(1 for f in floors if f % 2 != 0)
+    even_count = sum(1 for f in floors if f % 2 == 0)
+    
+    if odd_count > even_count:
+        # 奇数入口: 确保起点是奇数 (1, 3, 5...)
+        return block_min_f if block_min_f % 2 != 0 else block_min_f + 1
+    else:
+        # 偶数入口: 确保起点是偶数 (2, 4, 6...)
+        return block_min_f if block_min_f % 2 == 0 else block_min_f + 1
 
 # ==================== 3. 业务算法 ====================
 
@@ -155,28 +167,34 @@ def estimate_inventory(df, category_col='Category'):
     for blk in unique_blocks:
         blk_df = df[df['BLK'] == blk]
         
-        # 1. 确定步长 (Step)
+        # 1. 投票决定整栋楼的性质 (Step)
         step = detect_block_step(blk_df)
         
-        # 2. 确定高度范围
+        # 2. 物理高度
         min_f = int(blk_df['Floor_Num'].min())
         max_f = int(blk_df['Floor_Num'].max())
         if min_f < 1: min_f = 1
         
-        # 3. 模拟网格计算
-        # 如果是 Step 2 (1, 3, 5): 
-        # range(1, 6+1, 2) -> [1, 3, 5] -> len=3. (正确)
-        theoretical_floors = range(min_f, max_f + 1, step)
-        count_per_stack = len(theoretical_floors)
-
         unique_stacks = blk_df['Stack'].unique()
         for stack in unique_stacks:
             stack_df = blk_df[blk_df['Stack'] == stack]
             if not stack_df.empty:
                 dominant_cat = stack_df[category_col].mode()[0]
+                
+                # 🟢 3. 智能计数 (Smart Counting)
+                # 不再一刀切，而是根据每列的特征决定起点
+                start_f = get_stack_start_floor(stack_df, min_f, step)
+                
+                # 生成理论楼层: 
+                # 平层: 1, 2, 3...
+                # 奇数复式: 1, 3, 5...
+                # 偶数复式: 2, 4, 6...
+                theoretical_floors = range(start_f, max_f + 1, step)
+                count_per_stack = len(theoretical_floors)
+                
                 final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + count_per_stack
 
-    # 4. 兜底逻辑
+    # 4. 兜底
     observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
     for cat in final_totals:
         if final_totals[cat] < observed_counts.get(cat, 0):
