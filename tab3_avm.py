@@ -9,7 +9,6 @@ def render(df, project_name, chart_font_size):
     st.subheader("💎 单元智能估值 (AVM)")
 
     # ================= 1. 自动定位逻辑 =================
-    # 默认目标 (用于跳转)
     target_blk = None
     target_floor = None
     target_stack = None
@@ -21,60 +20,45 @@ def render(df, project_name, chart_font_size):
         target_stack = tgt['stack']
         
         st.success(f"已定位到: Block {target_blk} #{target_floor}-{target_stack}")
-        # 清除状态
         del st.session_state['avm_target']
 
     # ================= 2. 输入栏 (全下拉菜单) =================
     c1, c2, c3 = st.columns(3)
     
-    # --- 1. Block 选择 ---
+    # 1. Block
     with c1:
         blks = sorted(df['BLK'].unique())
-        # 确定 Block 默认索引
         b_idx = 0
         if target_blk in blks:
             b_idx = blks.index(target_blk)
-            
         s_blk = st.selectbox("1. 选择楼座 (Block)", blks, index=b_idx, key="avm_blk")
     
-    # --- 2. Floor 选择 (改为下拉菜单) ---
+    # 2. Floor
     with c2:
-        # 获取该 Block 的所有有效楼层
         blk_df = df[df['BLK'] == s_blk]
         if 'Floor_Num' in blk_df.columns:
-            # 提取楼层，去重，排序 (从小到大)
             valid_floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
         else:
-            valid_floors = list(range(1, 26)) # 兜底
+            valid_floors = list(range(1, 26))
             
         if not valid_floors: valid_floors = [1]
         
-        # 确定 Floor 默认索引
         f_idx = 0
-        # 优先匹配跳转目标
         if target_floor in valid_floors:
             f_idx = valid_floors.index(target_floor)
         else:
-            # 如果没有跳转目标，默认选中间层或者第10层
-            if 10 in valid_floors:
-                f_idx = valid_floors.index(10)
-            else:
-                f_idx = len(valid_floors) // 2 # 选中间层
+            if 10 in valid_floors: f_idx = valid_floors.index(10)
+            else: f_idx = len(valid_floors) // 2
                 
         s_floor = st.selectbox("2. 选择楼层 (Floor)", valid_floors, index=f_idx, key="avm_floor")
 
-    # --- 3. Stack 选择 (根据 Block + Floor 筛选) ---
+    # 3. Stack
     with c3:
-        # 筛选出该 Block 该 Floor 实际成交过的 Stack
         relevant_stacks = sorted(blk_df[blk_df['Floor_Num'] == s_floor]['Stack'].unique())
-        
-        # 如果该层完全没交易过(新盘或数据缺失)，则显示该栋楼所有的 Stack
         if not relevant_stacks:
             relevant_stacks = sorted(blk_df['Stack'].unique())
-        
         if not relevant_stacks: relevant_stacks = ['Unknown']
         
-        # 确定 Stack 默认索引
         s_idx = 0
         if target_stack in relevant_stacks:
             s_idx = relevant_stacks.index(target_stack)
@@ -84,7 +68,6 @@ def render(df, project_name, chart_font_size):
     # ================= 3. 核心计算与显示 =================
     if st.button("🚀 开始估值", type="primary", use_container_width=True):
         
-        # 调用核心算法
         area, val_psf, valuation, floor_diff, prem_rate, comps_df, subject_cat = calculate_avm(df, s_blk, s_stack, s_floor)
 
         if area is None:
@@ -142,12 +125,18 @@ def render(df, project_name, chart_font_size):
         # [Section 3] 本单位历史成交 (History)
         st.subheader("📜 本单位历史成交 (Unit History)")
         if not hist_df.empty:
+            # 🟢 修复核心: 动态检查列名，防止 KeyError
+            target_cols = ['Sale Date', 'Sale Price', 'Sale PSF', 'Type of Sale']
+            # 只取数据中实际存在的列
+            available_cols = [c for c in target_cols if c in hist_df.columns]
+            
             st.dataframe(
-                hist_df[['Sale Date', 'Sale Price', 'Sale PSF', 'Type of Sale']].style.format({
+                hist_df[available_cols].style.format({
                     'Sale Price': "${:,.0f}", 'Sale PSF': "${:,.0f}"
                 }),
                 use_container_width=True
             )
+            
             if ssd_rate > 0:
                 st.warning(f"⚠️ **SSD 风险提示**: 若现在出售，预计需缴纳 {ssd_text} 约 ${ssd_cost/1e6:.2f}M")
             else:
@@ -157,8 +146,13 @@ def render(df, project_name, chart_font_size):
 
         # [Section 4] 周边参考成交 (Comps)
         st.subheader("📉 周边参考成交 (Comparables)")
+        
+        # 同样做一次列检查，防止 Comps 表格也崩
+        comps_target_cols = ['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']
+        comps_avail_cols = [c for c in comps_target_cols if c in comps_df.columns]
+        
         st.dataframe(
-            comps_df[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']].style.format({
+            comps_df[comps_avail_cols].style.format({
                 'Sale Price': "${:,.0f}", 'Sale PSF': "${:,.0f}", 'Area (sqft)': "{:,.0f}"
             }),
             use_container_width=True
