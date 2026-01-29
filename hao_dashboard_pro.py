@@ -4,10 +4,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta # 需要这个库处理精确的年份加减
 import calendar
 import re 
 import numpy as np
-# 🟢 移除 sklearn，改用 numpy 原生实现
 
 # ==========================================
 # 🔧 1. 配置中心 (项目列表)
@@ -59,8 +59,8 @@ def load_data(file_or_url):
         if 'Sale Date' in df.columns:
             df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
-            # 用于回归的数字时间戳
             df['Date_Ordinal'] = df['Sale Date'].map(datetime.toordinal)
+            df['Quarter'] = df['Sale Date'].dt.to_period('Q')
 
         if 'BLK' in df.columns: df['BLK'] = df['BLK'].astype(str).str.strip()
         if 'Stack' in df.columns: df['Stack'] = df['Stack'].astype(str).str.strip()
@@ -150,7 +150,6 @@ def estimate_inventory(df, category_col='Category'):
         local_floors_set = set(df[df['BLK'] == blk]['Floor_Num'].unique())
         local_max = max(local_floors_set) if local_floors_set else 0
         final_count = len(local_floors_set)
-        
         if not stack_df.empty:
             top_cat = stack_df[category_col].mode()
             dominant_cat = top_cat[0] if not top_cat.empty else "Unknown"
@@ -160,11 +159,7 @@ def estimate_inventory(df, category_col='Category'):
         benchmark = cat_benchmark_floors.get(dominant_cat, local_max)
         if (local_max < benchmark - 2) and (local_max > benchmark * 0.5):
              final_count = int(benchmark)
-
-        stack_inventory_map[(blk, stack)] = {
-            'count': final_count,
-            'category': dominant_cat
-        }
+        stack_inventory_map[(blk, stack)] = {'count': final_count, 'category': dominant_cat}
 
     category_totals = {}
     for cat in df[category_col].unique():
@@ -174,19 +169,15 @@ def estimate_inventory(df, category_col='Category'):
         count = info['count']
         category_totals[cat] = category_totals.get(cat, 0) + count
             
-    st.session_state['block_inv_debug'] = {f"{k[0]}-{k[1]}": v['count'] for k, v in stack_inventory_map.items()}
     return category_totals
 
 def get_dynamic_floor_premium(df, category):
     cat_df = df[df['Category'] == category].copy()
     if cat_df.empty: return 0.005
-    
     recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
     recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
-    
     grouped = recent_df.groupby(['BLK', 'Stack'])
     rates = []
-    
     for _, group in grouped:
         if len(group) < 2: continue
         recs = group.to_dict('records')
@@ -196,53 +187,103 @@ def get_dynamic_floor_premium(df, category):
                 if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
                 floor_diff = r1['Floor_Num'] - r2['Floor_Num']
                 if floor_diff == 0: continue
-                
                 if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
                 else: high, low, f_delta = r2, r1, -floor_diff
-                
                 rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
                 if -0.005 < rate < 0.03: rates.append(rate)
-
     if len(rates) >= 3:
         fitted_rate = float(np.median(rates))
         return max(0.001, min(0.015, fitted_rate))
     else:
         return 0.005
 
-# 🟢 V42 核心升级: 使用 numpy 原生进行线性回归 (无依赖版)
+# 🟢 V44 核心: 智能 SSD 判定 (2025 New Policy)
+def calculate_ssd_status(purchase_date):
+    """
+    计算 SSD 状态 (支持 2025年7月4日 新政)
+    """
+    now = datetime.now()
+    purchase_dt = pd.to_datetime(purchase_date)
+    
+    # 政策分界线: 2025-07-04
+    NEW_POLICY_DATE = datetime(2025, 7, 4)
+    
+    rate = 0.0
+    emoji = "🟢"
+    status_text = "SSD Free"
+    
+    # 计算持有时间
+    held_days = (now - purchase_dt).days
+    held_years = held_days / 365.25
+    
+    # === 新政逻辑 (>= 2025-07-04) ===
+    if purchase_dt >= NEW_POLICY_DATE:
+        ssd_deadline = purchase_dt + relativedelta(years=4)
+        remaining_days = (ssd_deadline - now).days
+        
+        if held_years < 1:
+            rate = 0.16
+            emoji = "🔴"
+            status_text = "SSD 16%"
+        elif held_years < 2:
+            rate = 0.12
+            emoji = "🔴"
+            status_text = "SSD 12%"
+        elif held_years < 3:
+            rate = 0.08
+            emoji = "🔴"
+            status_text = "SSD 8%"
+        elif held_years < 4:
+            rate = 0.04
+            # 剩余6个月内变黄
+            if remaining_days <= 180:
+                emoji = "🟡" 
+                status_text = "SSD 4% (<6m)"
+            else:
+                emoji = "🔴"
+                status_text = "SSD 4%"
+    
+    # === 旧政逻辑 (2017-03-11 ~ 2025-07-03) ===
+    elif purchase_dt >= datetime(2017, 3, 11):
+        ssd_deadline = purchase_dt + relativedelta(years=3)
+        remaining_days = (ssd_deadline - now).days
+        
+        if held_years < 1:
+            rate = 0.12
+            emoji = "🔴"
+            status_text = "SSD 12%"
+        elif held_years < 2:
+            rate = 0.08
+            emoji = "🔴"
+            status_text = "SSD 8%"
+        elif held_years < 3:
+            rate = 0.04
+            if remaining_days <= 180:
+                emoji = "🟡" 
+                status_text = "SSD 4% (<6m)"
+            else:
+                emoji = "🔴"
+                status_text = "SSD 4%"
+    
+    return rate, emoji, status_text
+
 def get_market_trend_model(df):
-    """
-    📈 使用 numpy.polyfit 拟合全盘 PSF 趋势
-    返回一个 (trend_func, r_squared) 元组
-    """
     df_clean = df.dropna(subset=['Sale PSF', 'Date_Ordinal']).copy()
     if len(df_clean) < 10: return None, 0 
-    
-    # 剔除极端离群值
     q1 = df_clean['Sale PSF'].quantile(0.10)
     q3 = df_clean['Sale PSF'].quantile(0.90)
     df_clean = df_clean[(df_clean['Sale PSF'] >= q1) & (df_clean['Sale PSF'] <= q3)]
-    
     x = df_clean['Date_Ordinal'].values
     y = df_clean['Sale PSF'].values
-    
-    # 1次多项式拟合 (即线性回归 y = mx + c)
-    # slope, intercept
     coeffs = np.polyfit(x, y, 1) 
     trend_func = np.poly1d(coeffs)
-    
-    # 计算 R-squared
     y_pred = trend_func(x)
     ss_res = np.sum((y - y_pred) ** 2)
     ss_tot = np.sum((y - np.mean(y)) ** 2)
     r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-    
     return trend_func, r2
 
 def calculate_avm(df, blk, stack, floor):
-    """
-    🤖 AVM 自动估值模型 (V11: Numpy版稳健修正)
-    """
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
     if not target_unit.empty:
@@ -278,25 +319,17 @@ def calculate_avm(df, blk, stack, floor):
     if comps.empty:
         return subject_area, 0, 0, 0, 0.005, pd.DataFrame(), subject_cat
 
-    # 🟢 2. 稳健时间修正 (Numpy Implementation)
     trend_func, r2 = get_market_trend_model(df)
     current_date_ordinal = last_date.toordinal()
-    
-    # 只有当 R2 > 0.1 (说明确实有趋势) 时才应用修正
     use_trend = trend_func is not None and r2 > 0.1
     
     def adjust_psf(row):
         if not use_trend: return row['Sale PSF']
-        
         sale_ordinal = row['Sale Date'].toordinal()
-        # 使用 numpy poly1d 函数预测
         pred_then = trend_func(sale_ordinal)
         pred_now = trend_func(current_date_ordinal)
-        
         if pred_then <= 0: return row['Sale PSF']
-        
         ratio = pred_now / pred_then
-        # 钳制系数
         ratio = max(0.8, min(1.2, ratio))
         return row['Sale PSF'] * ratio
 
@@ -563,15 +596,14 @@ if df is not None:
                         
                         if not match.empty:
                             latest = match.sort_values('Sale Date', ascending=False).iloc[0]
-                            hold_days = (datetime.now() - latest['Sale Date']).days
-                            hold_years = hold_days / 365.25
-                            display_text = f"{unit_label}<br>{hold_years:.1f}y"
+                            # 🟢 V44: 智能 SSD 灯
+                            ssd_rate, ssd_emoji, _ = calculate_ssd_status(latest['Sale Date'])
                             
                             grid_data.append({
                                 'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Sold',
                                 'PSF': int(latest['Sale PSF']), 'Price': f"${latest['Sale Price']/1e6:.2f}M", 
                                 'Year': latest['Sale Year'], 'Raw_Floor': int(floor), 
-                                'Label': display_text, 
+                                'Label': f"{unit_label}<br>{ssd_emoji}", # 仅显示灯
                                 'Fmt_Stack': stack_fmt 
                             })
                         else:
@@ -609,7 +641,7 @@ if df is not None:
                         ))
 
                     fig_tower.update_layout(
-                        title=dict(text=f"Block {selected_blk} - 物理透视图", x=0.5),
+                        title=dict(text=f"Block {selected_blk} - 物理透视图 (SSD 状态灯: 🟢Free 🟡<6m 🔴Locked)", x=0.5),
                         xaxis=dict(title="Stack", type='category', side='bottom'),
                         yaxis=dict(title="Floor", type='category', categoryorder='array', categoryarray=y_category_order, dtick=1),
                         plot_bgcolor='white', height=max(400, len(y_category_order) * 35), 
@@ -621,7 +653,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v42_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v44_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -701,10 +733,24 @@ if df is not None:
                     
                     if not history_unit.empty:
                         last_price = history_unit.iloc[0]['Sale Price']
-                        est_gain = value - last_price
-                        est_gain_pct = est_gain / last_price
-                        gain_color = "normal" if est_gain > 0 else "inverse"
-                        m4.metric("🚀 预估增值 (vs 上次)", f"${est_gain/1e6:.2f}M", f"{est_gain_pct:+.1%}", delta_color=gain_color)
+                        last_date_val = history_unit.iloc[0]['Sale Date']
+                        
+                        # 🟢 V44: 净收益计算 (含 SSD 2025 逻辑)
+                        ssd_rate, ssd_emoji, ssd_text = calculate_ssd_status(last_date_val)
+                        est_gross_gain = value - last_price
+                        ssd_cost = value * ssd_rate # SSD based on Selling Price (Valuation)
+                        net_gain = est_gross_gain - ssd_cost
+                        net_gain_pct = net_gain / last_price
+                        
+                        gain_color = "normal" if net_gain > 0 else "inverse"
+                        
+                        m4.metric("🚀 预估净增值 (Net Gain)", f"${net_gain/1e6:.2f}M", f"{net_gain_pct:+.1%}", delta_color=gain_color)
+                        
+                        if ssd_rate > 0:
+                            st.caption(f"⚠️ {ssd_text}: 需扣除印花税约 ${ssd_cost/1e6:.2f}M")
+                        else:
+                            st.caption(f"✅ SSD Free: 无需扣除印花税")
+                            
                     else:
                         earliest_year = int(df['Sale Year'].min())
                         base_recs = df[(df['Sale Year'] == earliest_year) & (df['Category'] == subject_cat)]
@@ -714,7 +760,7 @@ if df is not None:
                             sim_gain = value - est_cost
                             sim_pct = sim_gain / est_cost
                             m4.metric(f"🔮 模拟增值 (自{earliest_year}年)", f"${sim_gain/1e6:.2f}M", f"{sim_pct:+.1%} (基于当年均价)", delta_color="off")
-                            st.caption(f"*注：该单元无历史交易。模拟增值假设以 {earliest_year} 年同户型均价 (${int(base_psf_avg):,} psf) 购入。")
+                            st.caption(f"*注：该单元无历史交易。")
                         else:
                             m4.metric("🚀 预估增值", "-", "无同期基准")
                     
