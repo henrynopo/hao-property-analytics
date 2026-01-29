@@ -216,7 +216,7 @@ def get_dynamic_floor_premium(df, category):
 
 def calculate_avm(df, blk, stack, floor):
     """
-    🤖 AVM 自动估值模型 (V5: 增加 subject_cat 返回)
+    🤖 AVM 自动估值模型 (V5)
     """
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
@@ -248,7 +248,6 @@ def calculate_avm(df, blk, stack, floor):
     
     floor_diff = floor - base_floor
     adjustment_factor = 1 + (floor_diff * premium_rate)
-    
     estimated_psf = base_psf * adjustment_factor
     valuation = subject_area * estimated_psf
     
@@ -259,13 +258,11 @@ def calculate_avm(df, blk, stack, floor):
     else:
         comps_display = comps_display[['Sale Date', 'BLK', 'Unit', 'Area (sqft)', 'Sale PSF', 'Sale Price']]
     
-    # 🟢 增加 subject_cat 返回，用于前端计算模拟持仓
     return subject_area, estimated_psf, valuation, floor_diff, premium_rate, comps_display, subject_cat
 
 def calculate_resale_metrics(df):
     """
     📊 计算转售利润 
-    (严格排除 New Sale 作为卖出点，New Sale 只能是买入起点)
     """
     if 'Unit_ID' not in df.columns: return pd.DataFrame()
     
@@ -461,7 +458,6 @@ if df is not None:
             }).reset_index()
             cat_stats.columns = ['Category', 'Avg Hold', 'Min Hold', 'Max Hold', 'Avg Gain', 'Max Loss/Min Gain', 'Max Gain', 'Avg Annualized']
             
-            # 🟢 强制字符串格式化
             cat_stats['Avg Gain'] = cat_stats['Avg Gain'].apply(format_currency)
             cat_stats['Max Loss/Min Gain'] = cat_stats['Max Loss/Min Gain'].apply(format_currency)
             cat_stats['Max Gain'] = cat_stats['Max Gain'].apply(format_currency)
@@ -504,15 +500,24 @@ if df is not None:
                         
                         if not match.empty:
                             latest = match.sort_values('Sale Date', ascending=False).iloc[0]
+                            # 🟢 V36 增强: 计算持有时长
+                            hold_days = (datetime.now() - latest['Sale Date']).days
+                            hold_years = hold_days / 365.25
+                            display_text = f"{unit_label}<br>{hold_years:.1f}y"
+                            
                             grid_data.append({
                                 'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Sold',
                                 'PSF': int(latest['Sale PSF']), 'Price': f"${latest['Sale Price']/1e6:.2f}M", 
-                                'Year': latest['Sale Year'], 'Raw_Floor': int(floor), 'Label': unit_label, 'Fmt_Stack': stack_fmt 
+                                'Year': latest['Sale Year'], 'Raw_Floor': int(floor), 
+                                'Label': display_text, # 使用带年份的文本
+                                'Fmt_Stack': stack_fmt 
                             })
                         else:
                             grid_data.append({
                                 'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Stock',
-                                'PSF': None, 'Price': '-', 'Year': '-', 'Raw_Floor': int(floor), 'Label': unit_label, 'Fmt_Stack': stack_fmt
+                                'PSF': None, 'Price': '-', 'Year': '-', 'Raw_Floor': int(floor), 
+                                'Label': unit_label, 
+                                'Fmt_Stack': stack_fmt
                             })
                 
                 viz_df = pd.DataFrame(grid_data)
@@ -535,8 +540,11 @@ if df is not None:
                             x=sold_df['Stack'], y=sold_df['Floor'], z=sold_df['PSF'],
                             colorscale='Teal', colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
                             xgap=2, ygap=2,
-                            hovertemplate="<b>%{customdata[2]}</b><br>💰 PSF: $%{z}<br>🏷️ 总价: %{customdata[3]}<br>📅 年份: %{customdata[4]}<extra></extra>",
-                            customdata=sold_df[['Stack', 'Raw_Floor', 'Label', 'Price', 'Year']]
+                            # 直接展示 text (Label 已经包含了 unit_label + years)
+                            text=sold_df['Label'],
+                            texttemplate="%{text}",
+                            hovertemplate="<b>Stack %{x} - #%{y}</b><br>💰 PSF: $%{z}<br>🏷️ 总价: %{customdata[2]}<br>📅 年份: %{customdata[3]}<extra></extra>",
+                            customdata=sold_df[['Stack', 'Raw_Floor', 'Price', 'Year']]
                         ))
 
                     fig_tower.update_layout(
@@ -552,7 +560,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v34_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v36_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -565,7 +573,6 @@ if df is not None:
                                 'stack': clk_stack,
                                 'floor': clk_floor
                             }
-                            st.success(f"已选中 {selected_blk} Stack {clk_stack} #{clk_floor}，请切换至 [💎 单元估值] Tab 查看报告。")
                 else:
                     st.warning("数据不足")
         else:
@@ -588,25 +595,17 @@ if df is not None:
         
         if sel_blk:
             blk_df = df[df['BLK'] == sel_blk]
-            
-            # 🟢 关键修复：基于最大物理楼层生成全量列表 (1 ~ Max)
             max_floor_num = int(blk_df['Floor_Num'].max())
-            # 生成 1 到 Max 的所有楼层
             all_possible_floors = sorted(list(range(1, max_floor_num + 1)))
             
-            # 尝试对齐 Floor
             if current_target.get('blk') == sel_blk and current_target.get('floor') in all_possible_floors:
                 def_floor_idx = all_possible_floors.index(current_target['floor'])
             
             with c_sel_2:
                 sel_floor = st.selectbox("Floor (楼层)", all_possible_floors, index=def_floor_idx, key="avm_floor_sel")
                 
-            # Stack (Dropdown)
             if sel_floor:
-                # 依然从 blk_df 获取所有 Stacks (Stack通常垂直贯通)
-                # 即使该楼层没交易，只要 Block 有这个 Stack 就可以选
                 all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
-                
                 if current_target.get('stack') and str(current_target.get('stack')) in [str(s) for s in all_stacks]:
                     stack_str_list = [str(s) for s in all_stacks]
                     def_stack_idx = stack_str_list.index(str(current_target['stack']))
@@ -637,7 +636,6 @@ if df is not None:
                     m2.metric(f"📊 估算 PSF ({premium_txt} 溢价)", f"${int(est_psf):,} psf", f"{floor_diff:+.0f} 层 (vs 均值)", delta_color=delta_c)
                     m3.metric("💰 HAO 估值 (Est. Value)", f"${value/1e6:.2f}M")
                     
-                    # 🚀 增值逻辑
                     history_unit = df[(df['BLK'] == sel_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)].sort_values('Sale Date', ascending=False)
                     
                     if not history_unit.empty:
@@ -647,21 +645,14 @@ if df is not None:
                         gain_color = "normal" if est_gain > 0 else "inverse"
                         m4.metric("🚀 预估增值 (vs 上次)", f"${est_gain/1e6:.2f}M", f"{est_gain_pct:+.1%}", delta_color=gain_color)
                     else:
-                        # V33: 模拟持仓逻辑
                         earliest_year = int(df['Sale Year'].min())
                         base_recs = df[(df['Sale Year'] == earliest_year) & (df['Category'] == subject_cat)]
-                        
                         if not base_recs.empty:
                             base_psf_avg = base_recs['Sale PSF'].mean()
                             est_cost = area * base_psf_avg
                             sim_gain = value - est_cost
                             sim_pct = sim_gain / est_cost
-                            m4.metric(
-                                f"🔮 模拟增值 (自{earliest_year}年)", 
-                                f"${sim_gain/1e6:.2f}M", 
-                                f"{sim_pct:+.1%} (基于当年均价)",
-                                delta_color="off" 
-                            )
+                            m4.metric(f"🔮 模拟增值 (自{earliest_year}年)", f"${sim_gain/1e6:.2f}M", f"{sim_pct:+.1%} (基于当年均价)", delta_color="off")
                             st.caption(f"*注：该单元无历史交易。模拟增值假设以 {earliest_year} 年同户型均价 (${int(base_psf_avg):,} psf) 购入。")
                         else:
                             m4.metric("🚀 预估增值", "-", "无同期基准")
@@ -695,41 +686,42 @@ if df is not None:
                     fig_range.update_layout(font=dict(size=chart_font_size))
                     st.plotly_chart(fig_range, use_container_width=True)
                     
-                    c_info1, c_info2 = st.columns(2)
+                    # 🟢 V36 布局修改：历史交易在上方，参考交易在下方
+                    st.write("##### 📜 该单元历史交易")
+                    if not history_unit.empty:
+                        hist_display = history_unit.copy()
+                        hist_display['Sale Date'] = hist_display['Sale Date'].dt.date
+                        hist_display['Sale Price'] = hist_display['Sale Price'].apply(format_currency)
+                        hist_display['Sale PSF'] = hist_display['Sale PSF'].apply(format_currency)
+                        st.dataframe(
+                            hist_display[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF']], 
+                            hide_index=True, use_container_width=True,
+                            column_config={
+                                "Sale Price": st.column_config.TextColumn("成交价"),
+                                "Sale PSF": st.column_config.TextColumn("尺价")
+                            }
+                        )
+                    else:
+                        st.info("暂无历史交易记录")
                     
-                    with c_info1:
-                        st.write("##### 📜 该单元历史交易")
-                        if not history_unit.empty:
-                            hist_display = history_unit.copy()
-                            hist_display['Sale Date'] = hist_display['Sale Date'].dt.date
-                            hist_display['Sale Price'] = hist_display['Sale Price'].apply(format_currency)
-                            hist_display['Sale PSF'] = hist_display['Sale PSF'].apply(format_currency)
-                            st.dataframe(
-                                hist_display[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF']], 
-                                hide_index=True, use_container_width=True,
-                                column_config={
-                                    "Sale Price": st.column_config.TextColumn("成交价"),
-                                    "Sale PSF": st.column_config.TextColumn("尺价")
-                                }
-                            )
-                        else:
-                            st.info("暂无历史交易记录")
+                    st.divider() # 分隔线
                     
-                    with c_info2:
-                        st.write(f"##### ⚖️ 估值参考 ({len(comps_df)} 笔相似成交)")
-                        if not comps_df.empty:
-                            comps_df['Sale Price'] = comps_df['Sale Price'].apply(format_currency)
-                            comps_df['Sale PSF'] = comps_df['Sale PSF'].apply(format_currency)
-                            st.dataframe(
-                                comps_df[['Sale Date', 'BLK', 'Unit', 'Sale Price', 'Sale PSF']], 
-                                hide_index=True, use_container_width=True,
-                                column_config={
-                                    "Sale Price": st.column_config.TextColumn("成交价"),
-                                    "Sale PSF": st.column_config.TextColumn("尺价")
-                                }
-                            )
-                        else:
-                            st.warning("数据量不足，无法找到相似对标。")
+                    st.write(f"##### ⚖️ 估值参考 ({len(comps_df)} 笔相似成交)")
+                    if not comps_df.empty:
+                        comps_df['Sale Price'] = comps_df['Sale Price'].apply(format_currency)
+                        comps_df['Sale PSF'] = comps_df['Sale PSF'].apply(format_currency)
+                        st.dataframe(
+                            comps_df[['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF']], 
+                            hide_index=True, use_container_width=True,
+                            column_config={
+                                "Sale Price": st.column_config.TextColumn("成交价"),
+                                "Sale PSF": st.column_config.TextColumn("尺价"),
+                                "Category": st.column_config.TextColumn("户型"),
+                                "Area (sqft)": st.column_config.NumberColumn("面积", format="%d"),
+                            }
+                        )
+                    else:
+                        st.warning("数据量不足，无法找到相似对标。")
                 else:
                     st.error("无法获取该单元的面积数据 (Missing Area)，无法估值。")
             except Exception as e:
@@ -742,7 +734,6 @@ if df is not None:
         if 'Unit' not in display_df.columns:
             display_df['Unit'] = display_df.apply(lambda x: f"#{int(x['Floor_Num']):02d}-{x['Stack']}", axis=1)
 
-        # 动态寻找卧室列
         bed_col = 'Category' 
         potential_bed_cols = ['No. of Bedrooms', 'Bedrooms', 'Bedroom Type', 'Bedroom_Type', 'Type']
         for c in potential_bed_cols:
@@ -750,7 +741,6 @@ if df is not None:
                 bed_col = c
                 break
         
-        # 🟢 格式化显示 (带千位符 - 强制 String)
         display_df['Sale Price'] = display_df['Sale Price'].apply(format_currency)
         display_df['Sale PSF'] = display_df['Sale PSF'].apply(format_currency)
         
@@ -764,7 +754,6 @@ if df is not None:
                 "Sale Date": st.column_config.DateColumn("成交日期"),
                 "Area (sqft)": st.column_config.NumberColumn("面积 (sqft)", format="%d"),
                 bed_col: st.column_config.TextColumn("卧室 (Bedrooms)"),
-                # 显式使用 TextColumn
                 "Sale Price": st.column_config.TextColumn("成交价 ($)"),
                 "Sale PSF": st.column_config.TextColumn("尺价 ($psf)"),
             }
