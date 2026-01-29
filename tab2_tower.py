@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
-from utils import natural_key, calculate_ssd_status, detect_block_step # 🟢 引入新函数
+from utils import natural_key, calculate_ssd_status, detect_block_step, get_stack_start_floor # 🟢 引入新函数
 
 def render(df, chart_font_size):
     st.subheader("🏢 楼宇透视")
@@ -33,18 +33,27 @@ def render(df, chart_font_size):
         max_f = int(valid_floors['Floor_Num'].max())
         if min_f < 1: min_f = 1
         
-        # 🟢 核心修复: 调用智能检测，决定是逐层画还是跳层画
+        # 1. 决定整栋楼的 Step
         step = detect_block_step(blk_df)
-        
-        # 生成楼层列表
-        # 如果 Step=2，生成 [2, 4, 6...]；如果 Step=1，生成 [1, 2, 3...]
-        sorted_floors_num = list(range(min_f, max_f + 1, step))
         
         all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
         
         grid_data = []
+        # 用于 Y 轴显示的并集集合
+        all_visible_floors = set()
+
         for stack in all_stacks:
-            for floor in sorted_floors_num:
+            # 获取该 Stack 的数据
+            stack_df = blk_df[blk_df['Stack'] == stack]
+            
+            # 🟢 2. 决定该 Stack 的起始楼层
+            start_f = get_stack_start_floor(stack_df, min_f, step)
+            
+            # 生成该 Stack 应有的楼层列表
+            stack_floors = list(range(start_f, max_f + 1, step))
+            all_visible_floors.update(stack_floors)
+            
+            for floor in stack_floors:
                 match = blk_df[
                     (blk_df['Stack'].astype(str) == str(stack)) & 
                     (blk_df['Floor_Num'] == floor)
@@ -70,7 +79,6 @@ def render(df, chart_font_size):
                     })
                 else:
                     # === 库存 ===
-                    # 只有在生成的列表里的层才会被填补，从而避免了复式楼中间层被填满的问题
                     grid_data.append({
                         'Stack': str(stack), 'Floor_Val': int(floor), 'Type': 'Stock',
                         'PSF': None, 'Price': '-', 'Year': '-', 'Raw_Floor': int(floor), 
@@ -105,17 +113,15 @@ def render(df, chart_font_size):
                     customdata=sold_df[['Stack', 'Raw_Floor', 'Price', 'Year']]
                 ))
 
-            # Y轴刻度设置
-            # 如果是 Step=2，我们希望显示的刻度也是跳跃的 (2, 4, 6...)
-            # 但 Plotly 有时会自动补全中间的刻度，所以这里强制指定
-            y_tick_vals = sorted_floors_num
-            y_tick_text = [str(f) for f in sorted_floors_num]
+            # Y轴刻度设置: 显示所有可见的楼层
+            y_tick_vals = sorted(list(all_visible_floors))
+            y_tick_text = [str(f) for f in y_tick_vals]
 
             fig_tower.update_layout(
                 title=dict(text=f"Block {selected_blk} (SSD: 🟢Free 🟡<6m 🔴Locked)", x=0.5),
                 xaxis=dict(title="Stack", type='category', side='bottom'),
                 yaxis=dict(
-                    title="Floor", tickmode='array', tickvals=y_tick_vals, ticktext=y_tick_text, dtick=step, # 🟢 设置步长
+                    title="Floor", tickmode='array', tickvals=y_tick_vals, ticktext=y_tick_text, dtick=1, # 强制显示所有刻度
                     range=[min_f - 0.5, max_f + 0.5]
                 ),
                 plot_bgcolor='white', 
