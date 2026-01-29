@@ -142,7 +142,7 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
         r2.metric("最长 / 最短持有", f"{resale_df['Hold_Years'].max():.1f} / {resale_df['Hold_Years'].min():.1f} 年")
         r3.metric("单位最大转售次数", f"{uid_counts.max() - 1 if not uid_counts.empty else 0} 次", f"平均 {avg_turnover:.1f} 次")
 
-        # 准备数据：分拆盈利和亏损
+        # 准备数据
         profits = resale_df[resale_df['Gain'] > 0]
         losses = resale_df[resale_df['Gain'] <= 0]
 
@@ -188,10 +188,9 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
             l3.metric("平均亏损", "-")
             l4.metric("最大亏损", "-")
 
-        # --- 5.4 详情 Breakdown (增加 Tabs) ---
+        # --- 5.4 详情 Breakdown ---
         st.markdown("###### 4. 详细表现 (Breakdown)")
         
-        # 使用 Tabs 分开展示 户型 和 楼栋
         tab_type, tab_blk = st.tabs(["按户型 (By Type)", "按楼栋 (By Block)"])
         
         # [Tab 1] 按户型
@@ -203,17 +202,19 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
                     'Hold_Years': 'mean'
                 }).reset_index()
                 sum_type.columns = ['Type', 'Count', 'Avg Gain', 'Max Gain', 'Min Gain', 'Avg Ann%', 'Avg Hold']
+                
+                # 🟢 修正：移除 background_gradient 以防止 ImportError
                 st.dataframe(
                     sum_type.style.format({
                         'Avg Gain': "${:,.0f}", 'Max Gain': "${:,.0f}", 'Min Gain': "${:,.0f}", 
                         'Avg Ann%': "{:.1f}%", 'Avg Hold': "{:.1f} Yrs"
-                    }).background_gradient(subset=['Avg Ann%'], cmap='Greens'),
+                    }),
                     use_container_width=True
                 )
             else:
                 st.info("数据中无户型信息")
 
-        # [Tab 2] 按楼栋 (新增)
+        # [Tab 2] 按楼栋
         with tab_blk:
             sum_blk = resale_df.groupby('BLK').agg({
                 'Gain': ['count', 'mean', 'max', 'min'],
@@ -221,11 +222,13 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
                 'Hold_Years': 'mean'
             }).reset_index()
             sum_blk.columns = ['Block', 'Count', 'Avg Gain', 'Max Gain', 'Min Gain', 'Avg Ann%', 'Avg Hold']
+            
+            # 🟢 修正：移除 background_gradient 以防止 ImportError
             st.dataframe(
                 sum_blk.style.format({
                     'Avg Gain': "${:,.0f}", 'Max Gain': "${:,.0f}", 'Min Gain': "${:,.0f}", 
                     'Avg Ann%': "{:.1f}%", 'Avg Hold': "{:.1f} Yrs"
-                }).background_gradient(subset=['Avg Ann%'], cmap='Blues'),
+                }),
                 use_container_width=True
             )
 
