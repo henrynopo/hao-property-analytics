@@ -2,57 +2,44 @@
 import streamlit as st
 import pandas as pd
 import re
+import html
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 核心：精准 SSD 政策计算器 (2025新政版) ---
+# --- 核心：SSD 计算器 ---
 def check_ssd_status(purchase_date):
     if pd.isna(purchase_date): return False, "无数据", 0
-    
-    # 确保是 datetime
     if not isinstance(purchase_date, datetime):
         purchase_date = pd.to_datetime(purchase_date)
         
     today = datetime.now()
+    POLICY_2025 = pd.Timestamp("2025-07-04")
+    POLICY_2017 = pd.Timestamp("2017-03-11")
     
-    # 关键政策时间点
-    POLICY_2025 = pd.Timestamp("2025-07-04") # 恢复为 4 年
-    POLICY_2017 = pd.Timestamp("2017-03-11") # 降为 3 年
-    
-    # 判定锁定期 (Holding Period)
     if purchase_date >= POLICY_2025:
         lock_years = 4
-        rule_desc = "新政(4年)"
+        desc = "4年"
     elif purchase_date >= POLICY_2017:
         lock_years = 3
-        rule_desc = "旧政(3年)"
+        desc = "3年"
     else:
-        lock_years = 4 # 2011-2017 也是4年
-        rule_desc = "老政(4年)"
+        lock_years = 4
+        desc = "4年"
         
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
     
     if today < ssd_deadline:
         days_left = (ssd_deadline - today).days
-        years_held = (today - purchase_date).days / 365.25
-        
-        # 估算当前税率 (简化版)
-        if years_held <= 1: rate = "16%" if lock_years==4 else "12%"
-        elif years_held <= 2: rate = "12%" if lock_years==4 else "8%"
-        elif years_held <= 3: rate = "8%" if lock_years==4 else "4%"
-        else: rate = "4%" # 仅针对4年期的第4年
-        
-        msg = f"🔒 SSD锁定期 ({rule_desc})\n剩余: {days_left} 天\n当前税率: {rate}\n解锁日期: {ssd_deadline.strftime('%Y-%m-%d')}"
-        return True, msg, lock_years
+        short_status = f"🔒 SSD:{desc}"
+        full_msg = f"状态: 🔒 锁定期 ({desc})\n剩余: {days_left} 天\n解锁: {ssd_deadline.strftime('%Y-%m-%d')}"
+        return True, short_status, full_msg
     else:
-        return False, "✅ SSD Free (已满限售期)", lock_years
+        return False, "✅ Free", "状态: ✅ SSD 已解禁"
 
-# 自然排序
 def natural_key(string_):
     if not isinstance(string_, str): return [0]
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', string_)]
 
-# 渲染主函数
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
 
@@ -61,98 +48,116 @@ def render(df, chart_font_size=12):
     selected_blk = st.selectbox("选择楼座 (Block)", all_blks, key="tab2_blk_select")
     blk_df = df[df['BLK'] == selected_blk].copy()
 
-    # 2. 楼层排序 (数字)
+    # 2. 楼层排序与准备
     if 'Floor_Num' in blk_df.columns:
         blk_df['Floor_Sort'] = blk_df['Floor_Num'].fillna(0).astype(int)
     else:
         blk_df['Floor_Sort'] = blk_df['Floor'].astype(str).str.extract(r'(\d+)')[0].fillna(0).astype(int)
 
-    # 3. 取最新交易
+    # 3. 构建完整骨架 (解决单元消失问题)
+    # 找出该楼座所有的 Stack (自然排序)
+    all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
+    
+    # 找出楼层范围 (Min 到 Max)
+    # 注意：如果数据太少可能不准，但通常这是推断楼宇结构的最好方法
+    if not blk_df.empty:
+        min_floor = int(blk_df['Floor_Sort'].min())
+        max_floor = int(blk_df['Floor_Sort'].max())
+        # 生成连续的楼层列表
+        all_floors = list(range(min_floor, max_floor + 1))
+    else:
+        all_floors = []
+
+    # 4. 取最新交易数据
     latest_tx = blk_df.sort_values('Sale Date').groupby(['Floor_Sort', 'Stack']).tail(1)
 
-    # 4. 生成 HTML (极简紧凑风格)
+    # 5. 生成 HTML
     def make_cell_html(row):
+        # 如果是空数据(填充出来的)，row里全是NaN
+        if pd.isna(row['Sale Date']):
+            return None
+            
         price = f"${row['Sale Price']/1e6:.2f}M"
         psf = f"${row['Sale PSF']:,.0f}"
         sale_date = row['Sale Date']
-        date_str = sale_date.strftime('%y-%m')
         
-        # 计算 SSD
-        is_locked, ssd_msg, _ = check_ssd_status(sale_date)
+        is_locked, short_status, full_ssd_msg = check_ssd_status(sale_date)
         
-        # 样式逻辑：锁定期(红色) vs 自由期(白色/灰色)
         if is_locked:
-            # 🔴 SSD 锁定期：红底白字，警示极强
-            bg_style = "background-color: #fee2e2; border: 1px solid #ef4444;"
-            text_color = "#991b1b" # 深红字
-            badge = "🔒"
+            bg_color = "#fee2e2"
+            border = "1px solid #f87171"
+            text_color = "#991b1b"
+            status_style = "color: #dc2626; font-weight: bold;"
         else:
-            # ⚪ 正常：极简白底
-            bg_style = "background-color: #ffffff; border: 1px solid #e5e7eb;"
-            text_color = "#374151"
-            badge = ""
+            bg_color = "#ffffff"
+            border = "1px solid #e5e7eb"
+            text_color = "#1f2937"
+            status_style = "color: #059669;"
 
-        # Tooltip 完整信息
-        full_tooltip = f"成交: {sale_date.strftime('%Y-%m-%d')}&#10;总价: {price}&#10;尺价: {psf} psf&#10;----------------&#10;{ssd_msg}"
+        raw_tooltip = f"成交日期: {sale_date.strftime('%Y-%m-%d')}\n总价: {price}\n尺价: {psf} psf\n{full_ssd_msg}"
+        safe_tooltip = html.escape(raw_tooltip, quote=True)
 
         return f"""
-        <div title="{full_tooltip}" style="
-            {bg_style}
+        <div title="{safe_tooltip}" style="
+            background-color: {bg_color};
+            border: {border};
             border-radius: 4px;
-            padding: 2px 4px;
+            padding: 2px;
             margin-bottom: 2px;
             text-align: center;
-            cursor: help;
             height: 100%;
-            display: flex; flex-direction: column; justify-content: center;
+            cursor: pointer;
         ">
-            <div style="font-weight: 700; font-size: 13px; color: {text_color}; line-height: 1.1;">
-                {price} {badge}
-            </div>
-            <div style="font-size: 11px; color: #6b7280; margin-top: 1px;">
-                {psf}
-            </div>
-            <div style="font-size: 9px; color: #9ca3af;">
-                {date_str}
-            </div>
+            <div style="font-weight: 700; font-size: 13px; color: {text_color}; line-height: 1.1;">{price}</div>
+            <div style="font-size: 11px; color: #4b5563;">{psf}</div>
+            <div style="font-size: 10px; {status_style} margin-top:1px;">{short_status}</div>
         </div>
         """
     
+    # 这里的 apply 可能会遇到全 NaN 的行，需要注意
+    # 我们先对 latest_tx 生成 display_html，此时只有有数据的行
     latest_tx['display_html'] = latest_tx.apply(make_cell_html, axis=1)
 
-    if not latest_tx.empty:
-        # 透视表
+    if not latest_tx.empty and all_floors:
+        # 6. 透视表与强制重索引 (核心修复步骤)
         unit_grid = latest_tx.pivot(index='Floor_Sort', columns='Stack', values='display_html')
-        # 排序
-        sorted_cols = sorted(unit_grid.columns.tolist(), key=natural_key)
-        unit_grid = unit_grid.reindex(columns=sorted_cols).sort_index(ascending=False)
         
-        # 5. 渲染网格 (高密度布局)
-        # 调整列宽：楼层列窄，数据列均分
-        cols = st.columns([0.6] + [1] * len(unit_grid.columns))
+        # 强制使用完整的 Stack 列表作为列 (即使某些 Stack 没交易也要显示)
+        unit_grid = unit_grid.reindex(columns=all_stacks)
         
+        # 强制使用完整的 Floor 列表作为索引 (即使某层没交易也要显示)
+        # 倒序排列：高层在上
+        unit_grid = unit_grid.reindex(index=sorted(all_floors, reverse=True))
+        
+        # 7. 渲染
+        # 动态列宽
+        cols = st.columns([0.6] + [1.2] * len(all_stacks))
+        
+        # 表头
         with cols[0]:
-            st.markdown(f"<div style='font-size:12px; font-weight:bold; padding-top:15px; text-align:right; padding-right:5px;'>Floor</div>", unsafe_allow_html=True)
-            
-        for i, stack_name in enumerate(unit_grid.columns):
+            st.markdown(f"<div style='font-size:12px; font-weight:bold; text-align:right; padding-right:8px;'>Floor</div>", unsafe_allow_html=True)
+        for i, stack_name in enumerate(all_stacks):
             with cols[i+1]:
-                st.markdown(f"<div style='text-align: center; font-weight: bold; font-size:12px; border-bottom:1px solid #ccc; padding-bottom:4px; margin-bottom:4px;'>{stack_name}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align: center; font-weight: bold; font-size:12px; border-bottom:1px solid #ccc;'>{stack_name}</div>", unsafe_allow_html=True)
 
+        # 表体
         for floor_num, row in unit_grid.iterrows():
-            c_row = st.columns([0.6] + [1] * len(unit_grid.columns))
+            c_row = st.columns([0.6] + [1.2] * len(all_stacks))
             
+            # 楼层号
             with c_row[0]:
-                st.markdown(f"<div style='font-size:12px; font-weight:bold; color:#666; text-align:right; padding-right:5px; padding-top:10px;'>L{floor_num}</div>", unsafe_allow_html=True)
-                
-            for i, stack_name in enumerate(unit_grid.columns):
+                st.markdown(f"<div style='font-size:12px; font-weight:bold; color:#666; text-align:right; padding-right:8px; padding-top:12px;'>L{floor_num}</div>", unsafe_allow_html=True)
+            
+            # 单元格
+            for i, stack_name in enumerate(all_stacks):
                 content = row[stack_name]
                 with c_row[i+1]:
                     if pd.isna(content):
-                        # 空白格占位
-                        st.markdown("<div style='height: 50px; border: 1px dashed #f3f4f6; margin-bottom: 2px; border-radius:4px;'></div>", unsafe_allow_html=True)
+                        # 空白格：显示灰色占位符，表示该单元物理存在但无交易
+                        st.markdown("<div style='height: 50px; background-color: #f3f4f6; margin-bottom: 2px; border-radius:4px; border:1px dashed #d1d5db;'></div>", unsafe_allow_html=True)
                     else:
                         st.markdown(content, unsafe_allow_html=True)
-        
-        st.caption("🔒 **红色高亮**表示该单位受 SSD 限制（含2025新政4年期）。鼠标悬停可查看剩余天数与税率。")
+                        
+        st.caption("注：灰色虚线框表示该单位在数据集中无历史交易记录，但根据楼宇结构推定存在。")
     else:
         st.info("该楼座暂无交易数据")
