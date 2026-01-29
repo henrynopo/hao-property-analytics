@@ -374,7 +374,7 @@ def format_currency(val):
     try: return f"${val:,.0f}"
     except: return val
 
-# 🟢 PDF Class (Lazy Import Safe & Fixed for fpdf2)
+# 🟢 PDF Class (Safe)
 if PDF_AVAILABLE:
     class PDFReport(FPDF):
         def header(self):
@@ -480,8 +480,8 @@ if PDF_AVAILABLE:
         add_table(history_df.head(10), "Unit Transaction History")
         add_table(comps_df.head(10), "Comparable Transactions")
         
-        # 🟢 V47 修复: fpdf2 默认返回二进制，无需 encode
-        return pdf.output()
+        # 🟢 修复: 强制转换为 bytes 避免 bytearray 报错
+        return bytes(pdf.output())
 
 # ==========================================
 # 🎨 4. 侧边栏与主界面逻辑
