@@ -12,58 +12,56 @@ except ImportError:
 if PDF_AVAILABLE:
     class PDFReport(FPDF):
         def header(self):
-            # 简洁的 Header
-            self.set_font('Arial', 'B', 10)
-            self.set_text_color(100, 100, 100)
-            self.cell(0, 5, f"{AGENT_PROFILE['Company']} ({AGENT_PROFILE['License']})", 0, 1, 'L')
+            # === Agent Letterhead (页眉) ===
+            self.set_font('Arial', 'B', 12)
+            self.set_text_color(50, 50, 50)
+            # 公司名 & 执照
+            self.cell(0, 6, f"{AGENT_PROFILE['Company']}", 0, 1, 'R')
+            self.set_font('Arial', '', 8)
+            self.cell(0, 4, f"Agency License: {AGENT_PROFILE['License']}", 0, 1, 'R')
             
-            self.set_y(10)
-            self.set_font('Arial', '', 9)
-            info = f"{AGENT_PROFILE['Name']} | {AGENT_PROFILE['RES_No']} | {AGENT_PROFILE['Mobile']}"
-            self.cell(0, 5, info, 0, 1, 'R')
-            
+            # 经纪人信息
             self.ln(2)
+            self.set_font('Arial', 'B', 10)
+            self.cell(0, 5, f"{AGENT_PROFILE['Name']} ({AGENT_PROFILE['Title']})", 0, 1, 'R')
+            self.set_font('Arial', '', 9)
+            self.cell(0, 5, f"CEA Reg: {AGENT_PROFILE['RES_No']} | Mobile: {AGENT_PROFILE['Mobile']}", 0, 1, 'R')
+            
+            # 分割线
+            self.ln(5)
             self.set_draw_color(200, 200, 200)
+            self.set_line_width(0.5)
             self.line(10, self.get_y(), 200, self.get_y())
             self.ln(5)
 
         def footer(self):
-            self.set_y(-15)
+            self.set_y(-20)
             self.set_font('Arial', 'I', 7)
             self.set_text_color(150, 150, 150)
-            disclaimer = "Disclaimer: Values are estimates (AVM) for reference only. Data source: URA/Huttons. Accuracy not guaranteed."
-            self.cell(0, 5, f'{disclaimer} | Page {self.page_no()}', 0, 0, 'C')
-
-        def add_watermark(self):
-            # 水印颜色更淡
-            self.set_font('Arial', 'B', 40)
-            self.set_text_color(245, 245, 245)
-            with self.rotation(45, 105, 148):
-                self.text(40, 190, AGENT_PROFILE['Name'].upper())
+            disclaimer = "Note: This valuation is an estimate based on recent transaction data (URA/Huttons) and is for reference only."
+            self.cell(0, 4, disclaimer, 0, 1, 'C')
+            self.cell(0, 4, f"Page {self.page_no()}", 0, 0, 'C')
 
     def draw_gauge_bar(pdf, x, y, w, h, low, high, current):
-        # 绘制简单的估值区间条
-        # 背景条 (灰色)
-        pdf.set_fill_color(230, 230, 230)
+        # 绘制估值区间条
+        pdf.set_fill_color(240, 240, 240)
         pdf.rect(x, y, w, h, 'F')
         
-        # 计算相对位置
         val_range = high - low
         if val_range == 0: val_range = 1
-        
-        # 绿色安全区 (Low ~ Current)
         safe_w = ((current - low) / val_range) * w
-        safe_w = max(0, min(w, safe_w)) # Clamp
+        safe_w = max(0, min(w, safe_w))
         
-        pdf.set_fill_color(144, 238, 144) # Light Green
+        # 绿色进度条
+        pdf.set_fill_color(100, 200, 100) 
         pdf.rect(x, y, safe_w, h, 'F')
         
-        # 当前值标记线
+        # 标记线
         pdf.set_draw_color(0, 0, 0)
         pdf.set_line_width(0.5)
         pdf.line(x + safe_w, y - 2, x + safe_w, y + h + 2)
         
-        # 文字标签
+        # 标签
         pdf.set_font('Arial', '', 7)
         pdf.set_text_color(100, 100, 100)
         pdf.text(x, y + h + 4, f"${low/1e6:.2f}M")
@@ -71,154 +69,154 @@ if PDF_AVAILABLE:
         
         pdf.set_font('Arial', 'B', 8)
         pdf.set_text_color(0, 0, 0)
-        pdf.text(x + safe_w - 5, y - 3, "Valuation")
+        pdf.text(x + safe_w - 5, y - 3, "Est. Price")
 
     def generate_pdf_report(project_name, unit_info, valuation_data, analysis_data, history_df, comps_df, data_cutoff):
         pdf = PDFReport()
+        pdf.set_margins(20, 20, 20) # 增加页边距，像正式信函
         pdf.add_page()
-        pdf.add_watermark()
         
-        # === 1. Title Section ===
-        pdf.set_font('Arial', 'B', 18)
-        pdf.set_text_color(44, 62, 80)
-        pdf.cell(0, 8, f"Valuation Report: {project_name}", 0, 1, 'C')
+        # === 1. 信函顶部信息 ===
         
-        pdf.set_font('Arial', '', 12)
-        pdf.cell(0, 6, f"Unit: Block {unit_info['blk']} {unit_info['unit']}", 0, 1, 'C')
+        # 日期 (右对齐)
+        pdf.set_y(40) # 留出 Header 空间
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 5, datetime.now().strftime('%d %B, %Y'), 0, 1, 'R')
         
-        pdf.set_font('Arial', 'I', 8)
-        pdf.set_text_color(120, 120, 120)
-        pdf.cell(0, 5, f"Generated: {datetime.now().strftime('%Y-%m-%d')} | Data Cutoff: {data_cutoff}", 0, 1, 'C')
+        # 收件人地址 (左对齐 - 适合开窗信封)
+        pdf.set_y(45)
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 5, "To: The Subsidiary Proprietor / Owner", 0, 1, 'L')
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 5, f"Unit #{unit_info['unit']}", 0, 1, 'L') # 例如 #05-12
+        pdf.cell(0, 5, f"Block {unit_info['blk']}, {project_name}", 0, 1, 'L')
+        pdf.cell(0, 5, "Singapore", 0, 1, 'L')
+        
+        pdf.ln(15)
+        
+        # === 2. 正文开头 ===
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 6, "Dear Homeowner,", 0, 1, 'L')
+        pdf.ln(2)
+        
+        # 引导语
+        intro_text = (
+            f"I am writing to share a personalized market update for your unit at {project_name}. "
+            f"Based on recent transaction trends and our proprietary data models, we have prepared an estimated valuation for your property."
+        )
+        pdf.multi_cell(0, 6, intro_text)
         pdf.ln(5)
         
-        # === 2. Valuation Box (紧凑版) ===
-        box_h = 24 # 降低高度
-        y_val = pdf.get_y()
+        # === 3. 核心估值卡片 (Highlight Box) ===
+        box_y = pdf.get_y()
+        pdf.set_fill_color(248, 250, 252) # Very light blue background
+        pdf.rect(20, box_y, 170, 35, 'F')
         
-        pdf.set_fill_color(240, 248, 255) # AliceBlue
-        pdf.rect(10, y_val, 190, box_h, 'F')
-        pdf.set_y(y_val + 4)
-        
-        # Row 1: Headers
-        pdf.set_font('Arial', 'B', 10)
-        pdf.set_text_color(100, 100, 100)
-        pdf.cell(63, 5, "Estimated Value", 0, 0, 'C')
-        pdf.cell(63, 5, "Unit Area", 0, 0, 'C')
-        pdf.cell(63, 5, "Est. PSF", 0, 1, 'C')
-        
-        # Row 2: Values
+        # 标题: 估值结果
+        pdf.set_y(box_y + 5)
         pdf.set_font('Arial', 'B', 14)
-        pdf.set_text_color(39, 174, 96) # Green
-        pdf.cell(63, 8, f"${valuation_data['value']/1e6:.2f}M", 0, 0, 'C')
+        pdf.set_text_color(44, 62, 80)
+        pdf.cell(0, 8, f"Estimated Value: ${valuation_data['value']/1e6:.2f} Million", 0, 1, 'C')
         
-        pdf.set_text_color(0, 0, 0)
-        pdf.set_font('Arial', 'B', 12)
-        pdf.cell(63, 8, f"{int(valuation_data['area']):,} sqft", 0, 0, 'C')
-        pdf.cell(63, 8, f"${int(valuation_data['psf']):,}", 0, 1, 'C')
-        
-        # === 3. Analysis Box (紧凑版) ===
-        pdf.set_y(y_val + box_h + 5)
-        y_ana = pdf.get_y()
-        
-        pdf.set_fill_color(255, 250, 240) # FloralWhite
-        pdf.rect(10, y_ana, 190, box_h, 'F')
-        pdf.set_y(y_ana + 4)
-        
-        pdf.set_font('Arial', 'B', 10)
+        # 副标题: 面积与单价
+        pdf.set_font('Arial', '', 11)
         pdf.set_text_color(100, 100, 100)
-        pdf.cell(63, 5, "Est. Net Gain", 0, 0, 'C')
-        pdf.cell(63, 5, "SSD Liability", 0, 0, 'C')
-        pdf.cell(63, 5, "Last Transacted", 0, 1, 'C')
+        detail_str = f"{int(valuation_data['area']):,} sqft  |  ${int(valuation_data['psf']):,} psf"
+        pdf.cell(0, 6, detail_str, 0, 1, 'C')
         
-        # Values
-        pdf.set_font('Arial', 'B', 12)
+        # 仪表盘图表 (嵌入在卡片下方)
+        draw_gauge_bar(pdf, 45, pdf.get_y()+2, 120, 4, valuation_data['value']*0.95, valuation_data['value']*1.05, valuation_data['value'])
+        pdf.ln(15) # 跳过图表区域
+        
+        # === 4. 市场分析摘要 ===
+        pdf.set_y(pdf.get_y() + 5)
+        
+        # 盈利分析
         gain = analysis_data['net_gain']
-        if gain > 0: 
-            pdf.set_text_color(39, 174, 96)
-            gain_str = f"+${gain/1e6:.2f}M"
-        elif gain < 0:
-            pdf.set_text_color(231, 76, 60)
-            gain_str = f"-${abs(gain)/1e6:.2f}M"
-        else:
-            pdf.set_text_color(100, 100, 100)
-            gain_str = "-"
-            
-        pdf.cell(63, 8, gain_str, 0, 0, 'C')
+        gain_txt = f"Potential Gain: ${gain/1e6:.2f}M" if gain > 0 else "Analysis: Hold for Upside"
+        color = (39, 174, 96) if gain > 0 else (100, 100, 100)
         
-        pdf.set_text_color(0, 0, 0)
-        ssd = analysis_data['ssd_cost']
-        pdf.cell(63, 8, f"${ssd/1e6:.2f}M" if ssd > 0 else "N.A.", 0, 0, 'C')
-        
-        last_px = analysis_data['last_price']
-        pdf.cell(63, 8, f"${last_px/1e6:.2f}M" if last_px > 0 else "Unknown", 0, 1, 'C')
-        
-        # === 4. Valuation Range Chart (新功能) ===
-        pdf.ln(8)
         pdf.set_font('Arial', 'B', 10)
-        pdf.cell(0, 6, "Valuation Confidence Range", 0, 1, 'L')
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(30, 6, "Analysis:", 0, 0)
+        pdf.set_text_color(*color)
+        pdf.cell(50, 6, gain_txt, 0, 0)
         
-        # 绘制图表
-        low_val = valuation_data['value'] * 0.95
-        high_val = valuation_data['value'] * 1.05
-        draw_gauge_bar(pdf, 15, pdf.get_y()+2, 180, 4, low_val, high_val, valuation_data['value'])
-        pdf.ln(12)
-        
-        # === 5. Comps Table (紧凑表格) ===
-        
-        def render_table(df_data, title):
-            if pdf.get_y() > 240: pdf.add_page() # 自动分页
+        # SSD 状态
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(25, 6, "SSD Status:", 0, 0)
+        ssd = analysis_data['ssd_cost']
+        if ssd > 0:
+            pdf.set_text_color(231, 76, 60)
+            pdf.cell(40, 6, f"Subject to SSD (${ssd/1e6:.2f}M)", 0, 1)
+        else:
+            pdf.set_text_color(39, 174, 96)
+            pdf.cell(40, 6, "SSD Free (Ready to Sell)", 0, 1)
             
-            pdf.set_font('Arial', 'B', 11)
-            pdf.set_text_color(44, 62, 80)
+        pdf.ln(5)
+        
+        # === 5. 交易数据表格 ===
+        
+        def print_table(df, title):
+            if df.empty: return
+            # Check page break
+            if pdf.get_y() > 220: pdf.add_page()
+            
+            pdf.set_font('Arial', 'B', 10)
+            pdf.set_text_color(0, 0, 0)
             pdf.cell(0, 8, title, 0, 1, 'L')
             
-            if df_data.empty:
-                pdf.set_font('Arial', 'I', 9)
-                pdf.cell(0, 6, "No recent records found.", 0, 1, 'L')
-                pdf.ln(5)
-                return
-
-            # Table Header
-            pdf.set_fill_color(220, 220, 220)
-            pdf.set_text_color(0, 0, 0)
+            # Header
+            pdf.set_fill_color(230, 230, 230)
             pdf.set_font('Arial', 'B', 8)
+            col_w = [25, 30, 30, 25, 25] # Date, Unit, Price, PSF, Area
+            headers = ['Date', 'Unit', 'Price ($)', 'PSF ($)', 'Area']
             
-            # Cols: Date, Unit, Price, PSF, Area
-            w_date, w_unit, w_price, w_psf, w_area = 30, 30, 35, 25, 25
-            pdf.cell(w_date, 6, 'Date', 1, 0, 'C', True)
-            pdf.cell(w_unit, 6, 'Unit', 1, 0, 'C', True)
-            pdf.cell(w_price, 6, 'Price ($)', 1, 0, 'C', True)
-            pdf.cell(w_psf, 6, 'PSF ($)', 1, 0, 'C', True)
-            pdf.cell(w_area, 6, 'Area', 1, 1, 'C', True)
+            for i, h in enumerate(headers):
+                pdf.cell(col_w[i], 6, h, 1, 0, 'C', True)
+            pdf.ln()
             
-            # Table Body
+            # Rows
             pdf.set_font('Arial', '', 8)
-            pdf.set_fill_color(255, 255, 255)
-            
-            for _, row in df_data.iterrows():
-                # Format
-                dt_str = row['Sale Date'].strftime('%d-%b-%y') if hasattr(row['Sale Date'], 'strftime') else str(row['Sale Date'])
+            for _, row in df.iterrows():
+                dt = row['Sale Date'].strftime('%d-%b-%y')
+                unit = row['Unit'] if 'Unit' in row else f"#{int(row.get('Floor_Num',0)):02d}-??"
+                px = f"${row['Sale Price']:,.0f}"
+                psf = f"${row['Sale PSF']:,.0f}"
+                area = f"{int(row['Area (sqft)'])}"
                 
-                # Unit check
-                unit_str = row['Unit'] if 'Unit' in row else f"#{int(row.get('Floor_Num', 0)):02d}-??"
-                
-                px_str = f"${row['Sale Price']:,.0f}" if pd.notnull(row['Sale Price']) else "-"
-                psf_str = f"${row['Sale PSF']:,.0f}" if pd.notnull(row['Sale PSF']) else "-"
-                area_str = f"{int(row['Area (sqft)'])}" if pd.notnull(row['Area (sqft)']) else "-"
-                
-                pdf.cell(w_date, 6, dt_str, 1, 0, 'C')
-                pdf.cell(w_unit, 6, unit_str, 1, 0, 'C')
-                pdf.cell(w_price, 6, px_str, 1, 0, 'C')
-                pdf.cell(w_psf, 6, psf_str, 1, 0, 'C')
-                pdf.cell(w_area, 6, area_str, 1, 1, 'C')
-            
+                pdf.cell(col_w[0], 6, dt, 1, 0, 'C')
+                pdf.cell(col_w[1], 6, unit, 1, 0, 'C')
+                pdf.cell(col_w[2], 6, px, 1, 0, 'C')
+                pdf.cell(col_w[3], 6, psf, 1, 0, 'C')
+                pdf.cell(col_w[4], 6, area, 1, 1, 'C')
             pdf.ln(5)
 
-        # 渲染两个表格
-        # 1. 最近成交 (Comps)
-        render_table(comps_df.head(5), "Recent Comparable Transactions (Comps)")
+        # 打印表格
+        print_table(comps_df.head(5), "Recent Comparable Transactions (Neighbours)")
+        if not history_df.empty:
+            print_table(history_df, "Transaction History of This Unit")
+            
+        # === 6. 落款 (Call to Action) ===
+        if pdf.get_y() > 240: pdf.add_page()
+        pdf.ln(5)
         
-        # 2. 本单位历史 (History)
-        render_table(history_df, "Unit Transaction History")
+        pdf.set_font('Arial', '', 11)
+        closing_text = (
+            "If you are considering restructuring your portfolio or would like a more detailed "
+            "financial calculation regarding your property assets, please feel free to contact me."
+        )
+        pdf.multi_cell(0, 6, closing_text)
+        pdf.ln(10)
+        
+        pdf.cell(0, 6, "Sincerely,", 0, 1)
+        pdf.ln(10) # 签名空间
+        
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 5, AGENT_PROFILE['Name'], 0, 1)
+        
+        pdf.set_font('Arial', '', 10)
+        pdf.cell(0, 5, f"{AGENT_PROFILE['Title']} | {AGENT_PROFILE['Company']}", 0, 1)
+        pdf.cell(0, 5, f"Mobile: {AGENT_PROFILE['Mobile']}", 0, 1)
         
         return bytes(pdf.output())
