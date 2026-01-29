@@ -20,35 +20,38 @@ def render(df, chart_font_size):
     if selected_blk:
         blk_df = df[df['BLK'] == selected_blk].copy()
         
+        # 1. 数据清洗与验证
         if 'Floor_Num' not in blk_df.columns:
             st.error("数据缺少 Floor_Num 列")
             return
-
+            
         valid_floors = blk_df.dropna(subset=['Floor_Num'])
         if valid_floors.empty:
             st.warning("该楼栋没有有效的楼层数据")
             return
 
-        # 🟢 核心修复：不再只取 unique()，而是强制生成连续的楼层范围
-        # 找出最低和最高层，强制填补中间的空缺
+        # 2. 确定坐标轴范围 (强制使用整数)
         min_f = int(valid_floors['Floor_Num'].min())
         max_f = int(valid_floors['Floor_Num'].max())
+        if min_f < 1: min_f = 1 # 只有地下室才允许负数，一般公寓最低1楼
         
-        # 保护逻辑：防止 floor 为 0 或负数
-        if min_f < 1: min_f = 1
-        
-        # 生成连续的楼层列表 (例如: 1, 2, 3, 4, ... 25)
-        # 这样即使 第4层 从未交易过，也会被强制画出来
+        # 生成连续的整数楼层列表 (从低到高)
         sorted_floors_num = list(range(min_f, max_f + 1))
-
+        
+        # 获取所有 Stack (列)
         all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key) if 'Stack' in blk_df.columns else ['Unknown']
         
+        # 3. 构建绘图数据 (Grid)
         grid_data = []
         for stack in all_stacks:
             for floor in sorted_floors_num:
-                # 查找交易记录
-                match = blk_df[(blk_df['Stack'] == stack) & (blk_df['Floor_Num'] == floor)]
+                # 精确匹配: 必须同时满足 Stack 和 Floor 相等
+                match = blk_df[
+                    (blk_df['Stack'].astype(str) == str(stack)) & 
+                    (blk_df['Floor_Num'] == floor)
+                ]
                 
+                # 格式化显示的编号
                 stack_str = str(stack).strip()
                 stack_fmt = stack_str.zfill(2) if stack_str.isdigit() else stack_str
                 unit_label = f"#{int(floor):02d}-{stack_fmt}"
@@ -62,7 +65,7 @@ def render(df, chart_font_size):
                     
                     grid_data.append({
                         'Stack': str(stack), 
-                        'Floor': str(int(floor)), 
+                        'Floor_Val': int(floor), # 🟢 关键：用于 Y 轴定位的纯数字
                         'Type': 'Sold',
                         'PSF': int(latest['Sale PSF']), 
                         'Price': f"${latest['Sale Price']/1e6:.2f}M", 
@@ -72,11 +75,10 @@ def render(df, chart_font_size):
                         'Fmt_Stack': stack_fmt 
                     })
                 else:
-                    # === 🟢 空缺填补 (Stock) ===
-                    # 无论是没有记录，还是中间断层，统统视为 Stock
+                    # === 空缺填补 (Stock) ===
                     grid_data.append({
                         'Stack': str(stack), 
-                        'Floor': str(int(floor)), 
+                        'Floor_Val': int(floor), # 🟢 关键：用于 Y 轴定位的纯数字
                         'Type': 'Stock',
                         'PSF': None, 
                         'Price': '-', 
@@ -90,31 +92,31 @@ def render(df, chart_font_size):
         
         if not viz_df.empty:
             fig_tower = go.Figure()
-            # 保证 Y 轴从低到高排序
-            y_cat_order = [str(f) for f in sorted_floors_num]
             
-            # 1. 绘制库存层 (Stock)
+            # --- 4. 绘制图层 ---
+            
+            # Layer 1: 库存 (Stock)
             stock_df = viz_df[viz_df['Type'] == 'Stock']
             if not stock_df.empty:
                 fig_tower.add_trace(go.Heatmap(
                     x=stock_df['Stack'], 
-                    y=stock_df['Floor'], 
+                    y=stock_df['Floor_Val'], # 使用纯数字定位
                     z=[1]*len(stock_df), 
                     colorscale=[[0, '#eeeeee'], [1, '#eeeeee']], 
                     showscale=False, 
                     xgap=2, ygap=2, 
                     text=stock_df['Label'],
-                    texttemplate="%{text}", # 🟢 确保文字显示在格子上
-                    hovertemplate="<b>Stack %{x} - #%{y}</b><br>🟢 Status: SSD Free (No Record)<br>点击查看估值<extra></extra>",
+                    texttemplate="%{text}", 
+                    hovertemplate="<b>Stack %{x} - #%{y}</b><br>🟢 SSD Free (Stock)<br>点击估值<extra></extra>",
                     customdata=stock_df[['Stack', 'Raw_Floor']]
                 ))
 
-            # 2. 绘制已售层 (Sold)
+            # Layer 2: 已售 (Sold)
             sold_df = viz_df[viz_df['Type'] == 'Sold']
             if not sold_df.empty:
                 fig_tower.add_trace(go.Heatmap(
                     x=sold_df['Stack'], 
-                    y=sold_df['Floor'], 
+                    y=sold_df['Floor_Val'], # 使用纯数字定位
                     z=sold_df['PSF'],
                     colorscale='Teal', 
                     colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
@@ -125,19 +127,32 @@ def render(df, chart_font_size):
                     customdata=sold_df[['Stack', 'Raw_Floor', 'Price', 'Year']]
                 ))
 
-            # 3. 布局优化
+            # --- 5. 坐标轴强制设置 ---
+            
+            # Y轴：强制显示所有整数楼层刻度，防止 3 变 13
+            y_tick_vals = sorted_floors_num
+            y_tick_text = [str(f) for f in sorted_floors_num]
+
             fig_tower.update_layout(
-                title=dict(text=f"Block {selected_blk} - 物理透视图 (SSD: 🟢Free 🟡<6m 🔴Locked)", x=0.5),
+                title=dict(text=f"Block {selected_blk} (SSD: 🟢Free 🟡<6m 🔴Locked)", x=0.5),
                 xaxis=dict(title="Stack", type='category', side='bottom'),
-                yaxis=dict(title="Floor", type='category', categoryorder='array', categoryarray=y_cat_order, dtick=1),
+                yaxis=dict(
+                    title="Floor", 
+                    tickmode='array',
+                    tickvals=y_tick_vals,
+                    ticktext=y_tick_text,
+                    dtick=1,
+                    range=[min_f - 0.5, max_f + 0.5] # 🟢 留白，防止顶底被切
+                ),
                 plot_bgcolor='white', 
-                height=max(500, len(y_cat_order) * 45), # 🟢 增加高度，让格子不那么扁
+                height=max(500, len(y_tick_vals) * 45), 
                 width=min(1200, 120 * len(all_stacks) + 200), 
                 margin=dict(l=50, r=50, t=60, b=50),
                 clickmode='event+select'
             )
             fig_tower.update_layout(font=dict(size=chart_font_size))
             
+            # --- 6. 渲染与交互 ---
             event = st.plotly_chart(
                 fig_tower, 
                 use_container_width=True, 
@@ -157,4 +172,4 @@ def render(df, chart_font_size):
                     }
                     st.toast(f"已选中 {selected_blk} #{point['customdata'][1]}-{point['customdata'][0]}", icon="✅")
         else:
-            st.warning("该楼栋数据不足")
+            st.warning("无数据可绘制")
