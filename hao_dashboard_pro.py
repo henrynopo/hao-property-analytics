@@ -262,7 +262,7 @@ def calculate_avm(df, blk, stack, floor):
 def calculate_resale_metrics(df):
     """
     📊 计算转售利润 
-    (严格排除 New Sale 作为卖出点，New Sale 只能是买入起点)
+    (严格排除 New Sale 作为卖出点)
     """
     if 'Unit_ID' not in df.columns: return pd.DataFrame()
     
@@ -273,7 +273,7 @@ def calculate_resale_metrics(df):
     # 初步筛选有前次交易的
     resales = df_sorted.dropna(subset=['Prev_Price']).copy()
     
-    # 🟢 严格过滤：如果数据源有 'Type of Sale'，排除 New Sale 作为卖出点
+    # 严格过滤 New Sale
     sale_type_col = None
     for col in df.columns:
         if 'Type of Sale' in col or 'Sale Type' in col:
@@ -282,7 +282,6 @@ def calculate_resale_metrics(df):
             
     if sale_type_col:
         valid_types = ['Resale', 'Sub Sale', 'Resales', 'Subsales']
-        # 模糊匹配
         mask = resales[sale_type_col].astype(str).str.strip().apply(lambda x: any(t.lower() in x.lower() for t in valid_types))
         resales = resales[mask]
     
@@ -470,6 +469,7 @@ if df is not None:
                 "Avg Hold": st.column_config.NumberColumn("平均持有 (年)", format="%.1f yrs"),
                 "Min Hold": st.column_config.NumberColumn("最短", format="%.1f"),
                 "Max Hold": st.column_config.NumberColumn("最长", format="%.1f"),
+                # 🟢 修复1: 强制保留2位小数的百分比
                 "Avg Annualized": st.column_config.NumberColumn("平均年化", format="%.2%"),
             })
         else:
@@ -552,7 +552,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v31_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v32_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -578,7 +578,6 @@ if df is not None:
         c_sel_1, c_sel_2, c_sel_3 = st.columns(3)
         def_blk_idx, def_floor_idx, def_stack_idx = 0, 0, 0
         
-        # 1. Block
         all_blks = sorted(df['BLK'].unique(), key=natural_key) if 'BLK' in df.columns else []
         current_target = st.session_state.get('avm_target', {})
         if current_target and current_target.get('blk') in all_blks:
@@ -590,8 +589,7 @@ if df is not None:
         if sel_blk:
             blk_df = df[df['BLK'] == sel_blk]
             
-            # 2. Floor (Dropdown 优化)
-            # 逻辑：Block -> Floor -> Stack
+            # Floor (Dropdown)
             blk_floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
             if current_target.get('blk') == sel_blk and current_target.get('floor') in blk_floors:
                 def_floor_idx = blk_floors.index(current_target['floor'])
@@ -599,13 +597,11 @@ if df is not None:
             with c_sel_2:
                 sel_floor = st.selectbox("Floor (楼层)", blk_floors, index=def_floor_idx, key="avm_floor_sel")
                 
-            # 3. Stack (Dropdown 优化)
+            # Stack (Dropdown)
             if sel_floor:
-                # 只显示该楼层存在的 Stack
                 floor_units = blk_df[blk_df['Floor_Num'] == sel_floor]
                 floor_stacks = sorted(floor_units['Stack'].unique(), key=natural_key)
                 
-                # 尝试对齐 Stack
                 if current_target.get('stack') and str(current_target.get('stack')) in [str(s) for s in floor_stacks]:
                     stack_str_list = [str(s) for s in floor_stacks]
                     def_stack_idx = stack_str_list.index(str(current_target['stack']))
@@ -629,12 +625,24 @@ if df is not None:
                     val_low = value * 0.9
                     val_high = value * 1.1
                     
-                    m1, m2, m3 = st.columns(3)
+                    # 🟢 修复2: 增加预估增值列 (4列布局)
+                    m1, m2, m3, m4 = st.columns(4)
                     m1.metric("📐 单元面积", f"{int(area):,} sqft")
                     premium_txt = f"{premium_rate*100:.1f}%"
                     delta_c = "normal" if floor_diff > 0 else "inverse"
                     m2.metric(f"📊 估算 PSF ({premium_txt} 溢价)", f"${int(est_psf):,} psf", f"{floor_diff:+.0f} 层 (vs 均值)", delta_color=delta_c)
-                    m3.metric("💰 HAO 估值 (Est. Value)", f"${value/1e6:.2f}M")
+                    m3.metric("💰 HAO 估值", f"${value/1e6:.2f}M")
+                    
+                    # 🟢 增值逻辑
+                    history_unit = df[(df['BLK'] == sel_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)].sort_values('Sale Date', ascending=False)
+                    if not history_unit.empty:
+                        last_price = history_unit.iloc[0]['Sale Price']
+                        est_gain = value - last_price
+                        est_gain_pct = est_gain / last_price
+                        gain_color = "normal" if est_gain > 0 else "inverse"
+                        m4.metric("🚀 预估增值 (vs 上次)", f"${est_gain/1e6:.2f}M", f"{est_gain_pct:+.1%}", delta_color=gain_color)
+                    else:
+                        m4.metric("🚀 预估增值", "-", "无历史记录")
                     
                     st.write("") 
 
@@ -667,15 +675,14 @@ if df is not None:
                     
                     c_info1, c_info2 = st.columns(2)
                     
-                    # 🟢 强制应用千位分隔符 (String Format)
                     with c_info1:
                         st.write("##### 📜 该单元历史交易")
-                        history = df[(df['BLK'] == sel_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)].copy()
-                        if not history.empty:
-                            history['Sale Date'] = history['Sale Date'].dt.date
-                            history['Sale Price'] = history['Sale Price'].apply(format_currency)
-                            history['Sale PSF'] = history['Sale PSF'].apply(format_currency)
-                            st.dataframe(history[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF']], hide_index=True, use_container_width=True)
+                        if not history_unit.empty:
+                            hist_display = history_unit.copy()
+                            hist_display['Sale Date'] = hist_display['Sale Date'].dt.date
+                            hist_display['Sale Price'] = hist_display['Sale Price'].apply(format_currency)
+                            hist_display['Sale PSF'] = hist_display['Sale PSF'].apply(format_currency)
+                            st.dataframe(hist_display[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF']], hide_index=True, use_container_width=True)
                         else:
                             st.info("暂无历史交易记录")
                     
@@ -707,4 +714,28 @@ if df is not None:
         potential_bed_cols = ['No. of Bedrooms', 'Bedrooms', 'Bedroom Type', 'Bedroom_Type', 'Type']
         for c in potential_bed_cols:
             if c in display_df.columns:
-                bed_col
+                bed_col = c
+                break
+        
+        # 🟢 格式化显示 (带千位符 - 强制 String)
+        display_df['Sale Price'] = display_df['Sale Price'].apply(format_currency)
+        display_df['Sale PSF'] = display_df['Sale PSF'].apply(format_currency)
+        
+        show_cols = ['Sale Date', 'BLK', 'Unit', bed_col, 'Area (sqft)', 'Sale Price', 'Sale PSF']
+        
+        st.dataframe(
+            display_df[show_cols].sort_values('Sale Date', ascending=False), 
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Sale Date": st.column_config.DateColumn("成交日期"),
+                "Area (sqft)": st.column_config.NumberColumn("面积 (sqft)", format="%d"),
+                bed_col: st.column_config.TextColumn("卧室 (Bedrooms)"),
+                # 显式使用 TextColumn
+                "Sale Price": st.column_config.TextColumn("成交价 ($)"),
+                "Sale PSF": st.column_config.TextColumn("尺价 ($psf)"),
+            }
+        )
+
+else:
+    st.info("👈 请在左侧选择项目或上传 CSV 文件。")
