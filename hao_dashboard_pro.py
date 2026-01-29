@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import calendar
 import re 
 import numpy as np
+from sklearn.linear_model import LinearRegression
 
 # ==========================================
 # 🔧 1. 配置中心 (项目列表)
@@ -58,7 +59,8 @@ def load_data(file_or_url):
         if 'Sale Date' in df.columns:
             df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
-            df['Quarter'] = df['Sale Date'].dt.to_period('Q')
+            # 用于回归的数字时间戳
+            df['Date_Ordinal'] = df['Sale Date'].map(datetime.toordinal)
 
         if 'BLK' in df.columns: df['BLK'] = df['BLK'].astype(str).str.strip()
         if 'Stack' in df.columns: df['Stack'] = df['Stack'].astype(str).str.strip()
@@ -207,16 +209,30 @@ def get_dynamic_floor_premium(df, category):
     else:
         return 0.005
 
-def get_market_index(df):
-    index_series = df.groupby('Quarter')['Sale PSF'].median().sort_index()
-    if not index_series.empty:
-        full_range = pd.period_range(start=index_series.index.min(), end=index_series.index.max(), freq='Q')
-        index_series = index_series.reindex(full_range).ffill()
-    return index_series
+# 🟢 V41 核心升级: 线性回归平滑指数
+def get_market_trend_model(df):
+    """
+    📈 使用线性回归拟合全盘 PSF 趋势
+    返回一个 (model, model_score) 元组
+    """
+    df_clean = df.dropna(subset=['Sale PSF', 'Date_Ordinal']).copy()
+    if len(df_clean) < 10: return None, 0 # 数据太少，不拟合
+    
+    # 剔除极端离群值 (Outliers)
+    q1 = df_clean['Sale PSF'].quantile(0.10)
+    q3 = df_clean['Sale PSF'].quantile(0.90)
+    df_clean = df_clean[(df_clean['Sale PSF'] >= q1) & (df_clean['Sale PSF'] <= q3)]
+    
+    X = df_clean[['Date_Ordinal']]
+    y = df_clean['Sale PSF']
+    
+    model = LinearRegression()
+    model.fit(X, y)
+    return model, model.score(X, y)
 
 def calculate_avm(df, blk, stack, floor):
     """
-    🤖 AVM 自动估值模型 (V9: 修复 Sale Price 缺失问题)
+    🤖 AVM 自动估值模型 (V10: 线性回归稳健修正)
     """
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
@@ -253,27 +269,42 @@ def calculate_avm(df, blk, stack, floor):
     if comps.empty:
         return subject_area, 0, 0, 0, 0.005, pd.DataFrame(), subject_cat
 
-    market_index = get_market_index(df)
-    current_q_idx = market_index.iloc[-1] if not market_index.empty else 1000
+    # 🟢 2. 稳健时间修正 (Robust Time Adjustment)
+    trend_model, r2 = get_market_trend_model(df)
+    current_date_ordinal = last_date.toordinal()
+    
+    # 只有当 R2 > 0.1 (说明确实有趋势) 时才应用修正，否则视为横盘
+    use_trend = trend_model is not None and r2 > 0.1
     
     def adjust_psf(row):
-        sale_q = row['Quarter']
-        if sale_q in market_index.index:
-            hist_idx = market_index.loc[sale_q]
-            if hist_idx > 0:
-                return row['Sale PSF'] * (current_q_idx / hist_idx)
-        return row['Sale PSF']
+        if not use_trend: return row['Sale PSF']
+        
+        sale_ordinal = row['Sale Date'].toordinal()
+        # 预测该时刻的趋势线价格
+        pred_then = trend_model.predict([[sale_ordinal]])[0]
+        pred_now = trend_model.predict([[current_date_ordinal]])[0]
+        
+        if pred_then <= 0: return row['Sale PSF']
+        
+        ratio = pred_now / pred_then
+        # 钳制系数 (Clamp): 防止修正过猛，限制在 0.8 ~ 1.2 之间
+        ratio = max(0.8, min(1.2, ratio))
+        
+        return row['Sale PSF'] * ratio
 
     comps['Adj_PSF'] = comps.apply(adjust_psf, axis=1)
 
+    # 3. 计算基准参数
     premium_rate = get_dynamic_floor_premium(df, subject_cat)
-    base_psf = comps['Adj_PSF'].median() 
+    base_psf = comps['Adj_PSF'].median() # 使用稳健修正后的 PSF
     base_floor = comps['Floor_Num'].median()
     
+    # 4. 计算模型估值
     floor_diff = floor - base_floor
     adjustment_factor = 1 + (floor_diff * premium_rate)
     model_psf = base_psf * adjustment_factor
     
+    # 5. 自身历史修正
     final_psf = model_psf
     if last_price_psf is not None:
         years_since_tx = (last_date - last_tx_date).days / 365.25
@@ -290,7 +321,6 @@ def calculate_avm(df, blk, stack, floor):
     if 'Unit' not in comps_display.columns:
         comps_display['Unit'] = comps_display.apply(lambda x: f"#{int(x['Floor_Num']):02d}-{x['Stack']}", axis=1)
     
-    # 🟢 修复：补回 'Sale Price'
     cols_to_keep = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF', 'Adj_PSF']
     cols_to_keep = [c for c in cols_to_keep if c in comps_display.columns]
     comps_display = comps_display[cols_to_keep]
@@ -586,7 +616,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v40_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v41_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -714,51 +744,47 @@ if df is not None:
                     
                     c_info1, c_info2 = st.columns(2)
                     
-                    with c_info1:
-                        st.write("##### 📜 该单元历史交易")
-                        if not history_unit.empty:
-                            hist_display = history_unit.copy()
-                            hist_display['Sale Date'] = hist_display['Sale Date'].dt.date
-                            hist_display['Sale Price'] = hist_display['Sale Price'].apply(format_currency)
-                            hist_display['Sale PSF'] = hist_display['Sale PSF'].apply(format_currency)
-                            st.dataframe(
-                                hist_display[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF']], 
-                                hide_index=True, use_container_width=True,
-                                column_config={
-                                    "Sale Price": st.column_config.TextColumn("成交价"),
-                                    "Sale PSF": st.column_config.TextColumn("尺价")
-                                }
-                            )
-                        else:
-                            st.info("暂无历史交易记录")
+                    st.write("##### 📜 该单元历史交易")
+                    if not history_unit.empty:
+                        hist_display = history_unit.copy()
+                        hist_display['Sale Date'] = hist_display['Sale Date'].dt.date
+                        hist_display['Sale Price'] = hist_display['Sale Price'].apply(format_currency)
+                        hist_display['Sale PSF'] = hist_display['Sale PSF'].apply(format_currency)
+                        st.dataframe(
+                            hist_display[['Sale Date', 'Unit', 'Sale Price', 'Sale PSF']], 
+                            hide_index=True, use_container_width=True,
+                            column_config={
+                                "Sale Price": st.column_config.TextColumn("成交价"),
+                                "Sale PSF": st.column_config.TextColumn("尺价")
+                            }
+                        )
+                    else:
+                        st.info("暂无历史交易记录")
                     
-                    # 🟢 修正：Comps 在下方
                     st.divider()
                     
-                    with st.container():
-                        st.write(f"##### ⚖️ 估值参考 ({len(comps_df)} 笔相似成交)")
-                        if not comps_df.empty:
-                            comps_df['Sale Price'] = comps_df['Sale Price'].apply(format_currency)
-                            comps_df['Sale PSF'] = comps_df['Sale PSF'].apply(format_currency)
-                            comps_df['Adj_PSF'] = comps_df['Adj_PSF'].apply(lambda x: f"{int(x)}")
-                            
-                            show_cols = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF', 'Adj_PSF']
-                            # 过滤不存在的列
-                            show_cols = [c for c in show_cols if c in comps_df.columns]
-                            
-                            st.dataframe(
-                                comps_df[show_cols], 
-                                hide_index=True, use_container_width=True,
-                                column_config={
-                                    "Sale Price": st.column_config.TextColumn("成交价"),
-                                    "Sale PSF": st.column_config.TextColumn("尺价 (Raw)"),
-                                    "Adj_PSF": st.column_config.TextColumn("修正后 PSF (Adj)"),
-                                    "Category": st.column_config.TextColumn("户型"),
-                                    "Area (sqft)": st.column_config.NumberColumn("面积", format="%d"),
-                                }
-                            )
-                        else:
-                            st.warning("数据量不足，无法找到相似对标。")
+                    st.write(f"##### ⚖️ 估值参考 ({len(comps_df)} 笔相似成交)")
+                    if not comps_df.empty:
+                        comps_df['Sale Price'] = comps_df['Sale Price'].apply(format_currency)
+                        comps_df['Sale PSF'] = comps_df['Sale PSF'].apply(format_currency)
+                        comps_df['Adj_PSF'] = comps_df['Adj_PSF'].apply(lambda x: f"{int(x)}")
+                        
+                        show_cols = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF', 'Adj_PSF']
+                        show_cols = [c for c in show_cols if c in comps_df.columns]
+                        
+                        st.dataframe(
+                            comps_df[show_cols], 
+                            hide_index=True, use_container_width=True,
+                            column_config={
+                                "Sale Price": st.column_config.TextColumn("成交价"),
+                                "Sale PSF": st.column_config.TextColumn("尺价 (Raw)"),
+                                "Adj_PSF": st.column_config.TextColumn("修正后 PSF (Adj)"),
+                                "Category": st.column_config.TextColumn("户型"),
+                                "Area (sqft)": st.column_config.NumberColumn("面积", format="%d"),
+                            }
+                        )
+                    else:
+                        st.warning("数据量不足，无法找到相似对标。")
                 else:
                     st.error("无法获取该单元的面积数据 (Missing Area)，无法估值。")
             except Exception as e:
