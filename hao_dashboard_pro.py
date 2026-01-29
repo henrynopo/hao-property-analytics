@@ -552,7 +552,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v33_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v34_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -589,23 +589,30 @@ if df is not None:
         if sel_blk:
             blk_df = df[df['BLK'] == sel_blk]
             
-            blk_floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
-            if current_target.get('blk') == sel_blk and current_target.get('floor') in blk_floors:
-                def_floor_idx = blk_floors.index(current_target['floor'])
+            # 🟢 关键修复：基于最大物理楼层生成全量列表 (1 ~ Max)
+            max_floor_num = int(blk_df['Floor_Num'].max())
+            # 生成 1 到 Max 的所有楼层
+            all_possible_floors = sorted(list(range(1, max_floor_num + 1)))
+            
+            # 尝试对齐 Floor
+            if current_target.get('blk') == sel_blk and current_target.get('floor') in all_possible_floors:
+                def_floor_idx = all_possible_floors.index(current_target['floor'])
             
             with c_sel_2:
-                sel_floor = st.selectbox("Floor (楼层)", blk_floors, index=def_floor_idx, key="avm_floor_sel")
+                sel_floor = st.selectbox("Floor (楼层)", all_possible_floors, index=def_floor_idx, key="avm_floor_sel")
                 
+            # Stack (Dropdown)
             if sel_floor:
-                floor_units = blk_df[blk_df['Floor_Num'] == sel_floor]
-                floor_stacks = sorted(floor_units['Stack'].unique(), key=natural_key)
+                # 依然从 blk_df 获取所有 Stacks (Stack通常垂直贯通)
+                # 即使该楼层没交易，只要 Block 有这个 Stack 就可以选
+                all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
                 
-                if current_target.get('stack') and str(current_target.get('stack')) in [str(s) for s in floor_stacks]:
-                    stack_str_list = [str(s) for s in floor_stacks]
+                if current_target.get('stack') and str(current_target.get('stack')) in [str(s) for s in all_stacks]:
+                    stack_str_list = [str(s) for s in all_stacks]
                     def_stack_idx = stack_str_list.index(str(current_target['stack']))
                 
                 with c_sel_3:
-                    sel_stack = st.selectbox("Stack (单元)", floor_stacks, index=def_stack_idx, key="avm_stack")
+                    sel_stack = st.selectbox("Stack (单元)", all_stacks, index=def_stack_idx, key="avm_stack")
         
         st.divider()
 
@@ -630,7 +637,7 @@ if df is not None:
                     m2.metric(f"📊 估算 PSF ({premium_txt} 溢价)", f"${int(est_psf):,} psf", f"{floor_diff:+.0f} 层 (vs 均值)", delta_color=delta_c)
                     m3.metric("💰 HAO 估值 (Est. Value)", f"${value/1e6:.2f}M")
                     
-                    # 🚀 增值逻辑 (含 V33 模拟持仓)
+                    # 🚀 增值逻辑
                     history_unit = df[(df['BLK'] == sel_blk) & (df['Stack'] == sel_stack) & (df['Floor_Num'] == sel_floor)].sort_values('Sale Date', ascending=False)
                     
                     if not history_unit.empty:
@@ -640,7 +647,7 @@ if df is not None:
                         gain_color = "normal" if est_gain > 0 else "inverse"
                         m4.metric("🚀 预估增值 (vs 上次)", f"${est_gain/1e6:.2f}M", f"{est_gain_pct:+.1%}", delta_color=gain_color)
                     else:
-                        # 🟢 V33: 模拟持仓逻辑
+                        # V33: 模拟持仓逻辑
                         earliest_year = int(df['Sale Year'].min())
                         base_recs = df[(df['Sale Year'] == earliest_year) & (df['Category'] == subject_cat)]
                         
@@ -649,7 +656,6 @@ if df is not None:
                             est_cost = area * base_psf_avg
                             sim_gain = value - est_cost
                             sim_pct = sim_gain / est_cost
-                            
                             m4.metric(
                                 f"🔮 模拟增值 (自{earliest_year}年)", 
                                 f"${sim_gain/1e6:.2f}M", 
