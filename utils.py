@@ -273,4 +273,34 @@ def calculate_avm(df, blk, stack, floor):
     final_psf = model_psf
     if last_price_psf is not None:
         years_since_tx = (last_date - last_tx_date).days / 365.25
-        if
+        if years_since_tx < 3: 
+            conservative_growth_factor = (1.01) ** years_since_tx
+            adjusted_hist_psf = last_price_psf * conservative_growth_factor
+            if model_psf < adjusted_hist_psf: final_psf = adjusted_hist_psf
+    
+    valuation = subject_area * final_psf
+    comps_display = comps.sort_values('Sale Date', ascending=False).head(5)
+    comps_display['Sale Date'] = comps_display['Sale Date'].dt.date
+    if 'Unit' not in comps_display.columns:
+        comps_display['Unit'] = comps_display.apply(lambda x: f"#{int(x['Floor_Num']):02d}-{x['Stack']}", axis=1)
+    cols_to_keep = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF', 'Adj_PSF']
+    cols_to_keep = [c for c in cols_to_keep if c in comps_display.columns]
+    comps_display = comps_display[cols_to_keep]
+    return subject_area, final_psf, valuation, floor_diff, premium_rate, comps_display, subject_cat
+
+def calculate_resale_metrics(df):
+    if 'Unit_ID' not in df.columns: return pd.DataFrame()
+    df_sorted = df.sort_values(['Unit_ID', 'Sale Date'])
+    df_sorted['Prev_Price'] = df_sorted.groupby('Unit_ID')['Sale Price'].shift(1)
+    df_sorted['Prev_Date'] = df_sorted.groupby('Unit_ID')['Sale Date'].shift(1)
+    resales = df_sorted.dropna(subset=['Prev_Price']).copy()
+    sale_type_col = next((c for c in df.columns if 'Type of Sale' in c or 'Sale Type' in c), None)
+    if sale_type_col:
+        mask = resales[sale_type_col].astype(str).str.strip().apply(lambda x: any(t.lower() in x.lower() for t in ['resale', 'sub sale', 'resales', 'subsales']))
+        resales = resales[mask]
+    if resales.empty: return pd.DataFrame()
+    resales['Gain'] = resales['Sale Price'] - resales['Prev_Price']
+    resales['Hold_Days'] = (resales['Sale Date'] - resales['Prev_Date']).dt.days
+    resales['Hold_Years'] = resales['Hold_Days'] / 365.25
+    resales['Annualized'] = (resales['Sale Price'] / resales['Prev_Price']) ** (1 / resales['Hold_Years'].replace(0, 0.01)) - 1
+    return resales
