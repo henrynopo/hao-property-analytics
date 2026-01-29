@@ -216,7 +216,7 @@ def get_dynamic_floor_premium(df, category):
 
 def calculate_avm(df, blk, stack, floor):
     """
-    🤖 AVM 自动估值模型 (V5)
+    🤖 AVM 自动估值模型 (V6: 修复 Category 缺失问题)
     """
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     
@@ -254,9 +254,13 @@ def calculate_avm(df, blk, stack, floor):
     comps_display = comps.sort_values('Sale Date', ascending=False).head(5)
     comps_display['Sale Date'] = comps_display['Sale Date'].dt.date
     if 'Unit' not in comps_display.columns:
-        comps_display = comps_display[['Sale Date', 'BLK', 'Stack', 'Floor', 'Area (sqft)', 'Sale PSF', 'Sale Price']]
-    else:
-        comps_display = comps_display[['Sale Date', 'BLK', 'Unit', 'Area (sqft)', 'Sale PSF', 'Sale Price']]
+        comps_display['Unit'] = comps_display.apply(lambda x: f"#{int(x['Floor_Num']):02d}-{x['Stack']}", axis=1)
+        
+    # 🟢 核心修复：确保 Category 被包含在返回数据中
+    cols_to_keep = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale PSF', 'Sale Price']
+    # 过滤掉万一不存在的列
+    cols_to_keep = [c for c in cols_to_keep if c in comps_display.columns]
+    comps_display = comps_display[cols_to_keep]
     
     return subject_area, estimated_psf, valuation, floor_diff, premium_rate, comps_display, subject_cat
 
@@ -458,6 +462,7 @@ if df is not None:
             }).reset_index()
             cat_stats.columns = ['Category', 'Avg Hold', 'Min Hold', 'Max Hold', 'Avg Gain', 'Max Loss/Min Gain', 'Max Gain', 'Avg Annualized']
             
+            # 🟢 强制字符串格式化
             cat_stats['Avg Gain'] = cat_stats['Avg Gain'].apply(format_currency)
             cat_stats['Max Loss/Min Gain'] = cat_stats['Max Loss/Min Gain'].apply(format_currency)
             cat_stats['Max Gain'] = cat_stats['Max Gain'].apply(format_currency)
@@ -500,7 +505,7 @@ if df is not None:
                         
                         if not match.empty:
                             latest = match.sort_values('Sale Date', ascending=False).iloc[0]
-                            # 🟢 V36 增强: 计算持有时长
+                            # 🟢 持有期
                             hold_days = (datetime.now() - latest['Sale Date']).days
                             hold_years = hold_days / 365.25
                             display_text = f"{unit_label}<br>{hold_years:.1f}y"
@@ -509,7 +514,7 @@ if df is not None:
                                 'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Sold',
                                 'PSF': int(latest['Sale PSF']), 'Price': f"${latest['Sale Price']/1e6:.2f}M", 
                                 'Year': latest['Sale Year'], 'Raw_Floor': int(floor), 
-                                'Label': display_text, # 使用带年份的文本
+                                'Label': display_text, 
                                 'Fmt_Stack': stack_fmt 
                             })
                         else:
@@ -540,7 +545,6 @@ if df is not None:
                             x=sold_df['Stack'], y=sold_df['Floor'], z=sold_df['PSF'],
                             colorscale='Teal', colorbar=dict(title="成交尺价 ($psf)", len=0.5, y=0.5),
                             xgap=2, ygap=2,
-                            # 直接展示 text (Label 已经包含了 unit_label + years)
                             text=sold_df['Label'],
                             texttemplate="%{text}",
                             hovertemplate="<b>Stack %{x} - #%{y}</b><br>💰 PSF: $%{z}<br>🏷️ 总价: %{customdata[2]}<br>📅 年份: %{customdata[3]}<extra></extra>",
@@ -560,7 +564,7 @@ if df is not None:
                     
                     event = st.plotly_chart(
                         fig_tower, use_container_width=True, on_select="rerun", selection_mode="points", 
-                        key=f"chart_v36_{selected_blk}", config={'displayModeBar': False}
+                        key=f"chart_v37_{selected_blk}", config={'displayModeBar': False}
                     )
                     
                     if event and "selection" in event and event["selection"]["points"]:
@@ -686,7 +690,7 @@ if df is not None:
                     fig_range.update_layout(font=dict(size=chart_font_size))
                     st.plotly_chart(fig_range, use_container_width=True)
                     
-                    # 🟢 V36 布局修改：历史交易在上方，参考交易在下方
+                    # 🟢 V37 修复: 历史交易与Comps改为上下布局
                     st.write("##### 📜 该单元历史交易")
                     if not history_unit.empty:
                         hist_display = history_unit.copy()
@@ -710,8 +714,13 @@ if df is not None:
                     if not comps_df.empty:
                         comps_df['Sale Price'] = comps_df['Sale Price'].apply(format_currency)
                         comps_df['Sale PSF'] = comps_df['Sale PSF'].apply(format_currency)
+                        
+                        # 确保只显示存在的列
+                        show_cols = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF']
+                        show_cols = [c for c in show_cols if c in comps_df.columns]
+                        
                         st.dataframe(
-                            comps_df[['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF']], 
+                            comps_df[show_cols], 
                             hide_index=True, use_container_width=True,
                             column_config={
                                 "Sale Price": st.column_config.TextColumn("成交价"),
