@@ -6,14 +6,14 @@ from utils import calculate_avm, calculate_ssd_status, natural_key
 from pdf_gen import generate_pdf_report, PDF_AVAILABLE
 
 def render(df, project_name, chart_font_size):
-    # 🟢 增加版本号，用于验证代码是否更新成功
-    st.subheader("💎 单元智能估值 (AVM) v80")
+    # 🟢 V81 标志：如果您看到这个标题，说明代码更新成功了！
+    st.markdown("### ✅ 单元智能估值 (AVM) V81 - 修复版")
 
-    # --- 1. 防止布局跳动的 Session State ---
+    # --- 1. 防止布局跳动 (Session State) ---
     if 'avm_result' not in st.session_state:
         st.session_state.avm_result = None
 
-    # --- 2. 自动定位逻辑 ---
+    # --- 2. 自动定位 ---
     target_blk, target_floor, target_stack = None, None, None
     if 'avm_target' in st.session_state:
         tgt = st.session_state['avm_target']
@@ -21,14 +21,14 @@ def render(df, project_name, chart_font_size):
         st.success(f"📍 已定位: {target_blk} #{target_floor}-{target_stack}")
         del st.session_state['avm_target']
 
-    # --- 3. 输入区 (全下拉菜单) ---
+    # --- 3. 输入区 (Block > Floor > Stack) ---
     c1, c2, c3 = st.columns(3)
     
     with c1:
         # Block 自然排序
         blks = sorted(df['BLK'].unique(), key=natural_key)
         b_idx = blks.index(target_blk) if target_blk in blks else 0
-        s_blk = st.selectbox("1. 楼座 (Block)", blks, index=b_idx, key="avm_blk_v80")
+        s_blk = st.selectbox("1. 楼座 (Block)", blks, index=b_idx, key="avm_blk_v81")
 
     with c2:
         # Floor 下拉菜单
@@ -40,7 +40,7 @@ def render(df, project_name, chart_font_size):
         if not valid_floors: valid_floors = [1]
         
         f_idx = valid_floors.index(target_floor) if target_floor in valid_floors else len(valid_floors)//2
-        s_floor = st.selectbox("2. 楼层 (Floor)", valid_floors, index=f_idx, key="avm_floor_v80")
+        s_floor = st.selectbox("2. 楼层 (Floor)", valid_floors, index=f_idx, key="avm_floor_v81")
 
     with c3:
         # Stack 智能筛选
@@ -50,9 +50,9 @@ def render(df, project_name, chart_font_size):
         if not relevant_stacks: relevant_stacks = ['Unknown']
         
         s_idx = relevant_stacks.index(target_stack) if target_stack in relevant_stacks else 0
-        s_stack = st.selectbox("3. 单元 (Stack)", relevant_stacks, index=s_idx, key="avm_stack_v80")
+        s_stack = st.selectbox("3. 单元 (Stack)", relevant_stacks, index=s_idx, key="avm_stack_v81")
 
-    # --- 4. 触发计算 (结果存入 Session State) ---
+    # --- 4. 触发计算 ---
     if st.button("🚀 开始估值", type="primary", use_container_width=True):
         area, val_psf, valuation, floor_diff, prem_rate, comps_df, subject_cat = calculate_avm(df, s_blk, s_stack, s_floor)
         
@@ -60,14 +60,14 @@ def render(df, project_name, chart_font_size):
             st.error("❌ 数据不足，无法估值")
             st.session_state.avm_result = None
         else:
-            # 锁定结果
+            # 存入 Session State 锁定结果
             st.session_state.avm_result = {
                 'area': area, 'val_psf': val_psf, 'valuation': valuation,
                 's_blk': s_blk, 's_stack': s_stack, 's_floor': s_floor,
                 'comps_df': comps_df
             }
 
-    # --- 5. 结果渲染 (从 Session State 读取) ---
+    # --- 5. 结果渲染 ---
     if st.session_state.avm_result is not None:
         res = st.session_state.avm_result
         
@@ -107,10 +107,10 @@ def render(df, project_name, chart_font_size):
             number={'prefix': "$", 'valueformat': ",.0f"},
             gauge={
                 'axis': {'range': [valuation*0.85, valuation*1.15]},
-                'bar': {'color': "#1f77b4"}, # 深蓝色
+                'bar': {'color': "#1f77b4"},
                 'steps': [
                     {'range': [valuation*0.85, valuation*0.95], 'color': "#f0f2f6"},
-                    {'range': [valuation*0.95, valuation*1.05], 'color': "#cbf3f0"}, # 浅绿
+                    {'range': [valuation*0.95, valuation*1.05], 'color': "#cbf3f0"},
                     {'range': [valuation*1.05, valuation*1.15], 'color': "#f0f2f6"}
                 ]
             }
@@ -121,9 +121,8 @@ def render(df, project_name, chart_font_size):
         # [C] 历史成交 (在上)
         st.subheader("📜 本单位历史 (History)")
         if not hist_df.empty:
-            # 🟢 动态检测：这是您之前报错的地方，现在使用 intersection 绝对安全
+            # 🟢 防崩关键：只显示存在的列，绝对不报 KeyError
             possible_cols = ['Sale Date', 'Sale Price', 'Sale PSF', 'Type of Sale']
-            # 只取数据里实际有的列
             actual_cols = [c for c in possible_cols if c in hist_df.columns]
             
             st.dataframe(
@@ -138,7 +137,6 @@ def render(df, project_name, chart_font_size):
 
         # [D] 周边成交 (在下)
         st.subheader("📉 周边参考 (Comps)")
-        # 同样的防崩逻辑
         comp_possible = ['Sale Date', 'Unit', 'Sale Price', 'Sale PSF', 'Area (sqft)']
         comp_actual = [c for c in comp_possible if c in comps_df.columns]
         
