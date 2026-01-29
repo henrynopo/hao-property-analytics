@@ -1,3 +1,4 @@
+# tab2_tower.py
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -32,9 +33,11 @@ def render(df, chart_font_size):
                 unit_label = f"#{int(floor):02d}-{stack_fmt}"
                 
                 if not match.empty:
+                    # === 已售单位 (Sold) ===
                     latest = match.sort_values('Sale Date', ascending=False).iloc[0]
                     hold_days = (datetime.now() - latest['Sale Date']).days
                     hold_years = hold_days / 365.25
+                    # 计算实际 SSD 状态 (红/黄/绿)
                     _, ssd_emoji, _ = calculate_ssd_status(latest['Sale Date'])
                     
                     grid_data.append({
@@ -45,10 +48,14 @@ def render(df, chart_font_size):
                         'Fmt_Stack': stack_fmt 
                     })
                 else:
+                    # === 🟢 库存单位 (Stock) ===
+                    # 逻辑：既然不在最近的交易记录里，说明持有时间很久，默认为 SSD Free
                     grid_data.append({
                         'Stack': str(stack), 'Floor': str(int(floor)), 'Type': 'Stock',
                         'PSF': None, 'Price': '-', 'Year': '-', 'Raw_Floor': int(floor), 
-                        'Label': unit_label, 'Fmt_Stack': stack_fmt
+                        # 🟢 修改点：增加绿灯 emoji
+                        'Label': f"{unit_label}<br>🟢", 
+                        'Fmt_Stack': stack_fmt
                     })
         
         viz_df = pd.DataFrame(grid_data)
@@ -56,14 +63,17 @@ def render(df, chart_font_size):
             fig_tower = go.Figure()
             y_cat_order = [str(f) for f in sorted_floors_num]
             
+            # 1. 绘制库存层 (灰色背景 + 绿灯)
             stock_df = viz_df[viz_df['Type'] == 'Stock']
             if not stock_df.empty:
                 fig_tower.add_trace(go.Heatmap(
                     x=stock_df['Stack'], y=stock_df['Floor'], z=[1]*len(stock_df),
                     colorscale=[[0, '#eeeeee'], [1, '#eeeeee']], showscale=False, xgap=2, ygap=2, hoverinfo='text',
-                    text=stock_df['Label'] + "<br>点击查看估值", customdata=stock_df[['Stack', 'Raw_Floor']]
+                    text=stock_df['Label'] + "<br>点击查看估值", 
+                    customdata=stock_df[['Stack', 'Raw_Floor']]
                 ))
 
+            # 2. 绘制已售层 (热力色 + 真实状态灯)
             sold_df = viz_df[viz_df['Type'] == 'Sold']
             if not sold_df.empty:
                 fig_tower.add_trace(go.Heatmap(
@@ -93,6 +103,7 @@ def render(df, chart_font_size):
                     st.session_state['avm_target'] = {
                         'blk': selected_blk, 'stack': str(point["customdata"][0]), 'floor': int(point["customdata"][1])
                     }
-                    st.success(f"已选中 {selected_blk} Stack {point['customdata'][0]} #{point['customdata'][1]}，请切换至 [💎 单元估值] Tab 查看报告。")
+                    # 简化提示文案，避免太长
+                    st.toast(f"已选中 {selected_blk} #{point['customdata'][1]}-{point['customdata'][0]}", icon="✅")
         else:
             st.warning("数据不足")
