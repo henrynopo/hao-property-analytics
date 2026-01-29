@@ -11,34 +11,18 @@ def natural_key(string_):
     if not isinstance(string_, str): return [0]
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', string_)]
 
-# --- 内部辅助函数 2: 通用 KPI 卡片生成器 (核心UI组件) ---
+# --- 内部辅助函数 2: KPI 卡片 ---
 def kpi_card(label, value, sub_value=None, color="default"):
-    """
-    生成统一风格的 HTML 卡片
-    color: 'default' (黑), 'green' (绿-盈利), 'red' (红-亏损)
-    """
     color_map = {
         "default": "#111827",
-        "green": "#059669", # Emerald 600
-        "red": "#dc2626"    # Red 600
+        "green": "#059669",
+        "red": "#dc2626",
+        "blue": "#2563eb"
     }
     text_color = color_map.get(color, "#111827")
-    
     sub_html = f'<div style="font-size: 12px; color: #6b7280; margin-top: 2px;">{sub_value}</div>' if sub_value else ""
-    
     return f"""
-    <div style="
-        background-color: #f9fafb;
-        border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 12px 8px;
-        text-align: center;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-    ">
+    <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center;">
         <div style="font-size: 13px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">{label}</div>
         <div style="font-size: 18px; font-weight: 700; color: {text_color}; line-height: 1.2;">{value}</div>
         {sub_html}
@@ -62,7 +46,6 @@ def _process_resale_data(df):
     resales['Gain'] = resales['Sale Price'] - resales['Prev_Price']
     resales['Hold_Days'] = (resales['Sale Date'] - resales['Prev_Date']).dt.days
     
-    # 过滤 < 30天
     resales = resales[resales['Hold_Days'] > 30].copy()
     if resales.empty: return pd.DataFrame()
 
@@ -87,7 +70,7 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
 
     resale_df = _process_resale_data(df)
 
-    # ================= 2. 宏观 KPI (UI 统一) =================
+    # 1. 宏观 KPI
     if 'Floor_Num' in df.columns:
         total_units = df[['BLK', 'Stack', 'Floor_Num']].drop_duplicates().shape[0]
     else:
@@ -108,7 +91,7 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
 
     st.markdown("---")
 
-    # ================= 3. 历年量价 =================
+    # 2. 历年量价 (修复字号)
     st.markdown("##### 📈 历年量价趋势")
     tab_trend_all, tab_trend_cat = st.tabs(["总体趋势", "分户型趋势"])
     
@@ -117,20 +100,37 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
         fig = go.Figure()
         fig.add_trace(go.Bar(x=yearly['Year'], y=yearly['Sale Price'], name='成交量', marker_color='#dbeafe', yaxis='y'))
         fig.add_trace(go.Scatter(x=yearly['Year'], y=yearly['Sale PSF'], name='平均尺价', mode='lines+markers', line=dict(color=chart_color, width=3), yaxis='y2'))
-        fig.update_layout(yaxis=dict(title='成交量 (笔)', side='left', showgrid=False), yaxis2=dict(title='尺价 ($PSF)', side='right', overlaying='y'), hovermode='x unified', height=350, margin=dict(l=10, r=10, t=30, b=10))
+        
+        # 🟢 修复：强制应用 chart_font_size
+        fig.update_layout(
+            yaxis=dict(title='成交量 (笔)', side='left', showgrid=False), 
+            yaxis2=dict(title='尺价 ($PSF)', side='right', overlaying='y'), 
+            hovermode='x unified', 
+            height=350, 
+            margin=dict(l=10, r=10, t=30, b=10),
+            font=dict(size=chart_font_size),  # <--- 关键参数
+            legend=dict(orientation="h", y=1.1)
+        )
         st.plotly_chart(fig, use_container_width=True)
 
     with tab_trend_cat:
         if cat_col:
             cat_trend = df.groupby(['Year', cat_col]).agg({'Sale PSF': 'mean'}).reset_index()
             fig_cat = px.line(cat_trend, x='Year', y='Sale PSF', color=cat_col, markers=True, title="各户型平均尺价走势")
-            fig_cat.update_layout(height=400, hovermode='x unified')
+            
+            # 🟢 修复：强制应用 chart_font_size
+            fig_cat.update_layout(
+                height=400, 
+                hovermode='x unified',
+                font=dict(size=chart_font_size), # <--- 关键参数
+                legend=dict(orientation="h", y=1.1)
+            )
             st.plotly_chart(fig_cat, use_container_width=True)
         else: st.info("无户型信息")
 
     st.markdown("---")
 
-    # ================= 4. 活跃度分析 (UI 统一) =================
+    # 3. 活跃度分析
     st.markdown("##### 🔥 活跃度分析")
     def get_top(col):
         if col not in df.columns: return "N/A", 0, 0
@@ -138,7 +138,6 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
         top = stats.sort_values('Sale Price', ascending=False).iloc[0]
         return top[col], top['Sale Price'], top['Sale PSF']
 
-    # 这里虽然是 st.info，但也可以考虑改用卡片，不过 st.info 适合展示多行文本，暂时保留，保持语义区别
     a1, a2, a3, a4 = st.columns(4)
     b_n, b_c, b_p = get_top('BLK')
     a1.info(f"**楼栋: {b_n}**\n\n{b_c}笔 | ${b_p:,.0f}psf")
@@ -156,13 +155,13 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
 
     st.markdown("---")
 
-    # ================= 5. 转售与回报 (核心区域 - UI 统一) =================
+    # 4. 转售与回报
     st.subheader("💰 转售与回报 (Resale & Returns)")
     
     if resale_df.empty:
         st.warning("无足够转售数据。")
     else:
-        # --- 5.1 持有统计 ---
+        # 4.1 持有统计
         st.markdown("###### 1. 持有表现")
         uid_counts = df.groupby(['BLK','Stack','Floor_Num']).size()
         uid_counts = uid_counts[uid_counts > 1] 
@@ -176,14 +175,12 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
         profits = resale_df[resale_df['Gain'] > 0]
         losses = resale_df[resale_df['Gain'] <= 0]
 
-        # --- 5.2 盈利表现 ---
+        # 4.2 盈利表现
         st.markdown("###### 2. 盈利表现 (仅统计获利交易)")
         if not profits.empty:
             avg_ann = profits['Annualized'].mean()
             max_ann = profits['Annualized'].max()
-            
             c1, c2, c3, c4 = st.columns(4)
-            # 使用 green 风格
             with c1: st.markdown(kpi_card("盈利笔数", f"{len(profits)} 笔", color="green"), unsafe_allow_html=True)
             with c2: st.markdown(kpi_card("平均获利", f"${profits['Gain'].mean()/1e4:,.0f}k", color="green"), unsafe_allow_html=True)
             with c3: st.markdown(kpi_card("最大获利", f"${profits['Gain'].max()/1e4:,.0f}k", color="green"), unsafe_allow_html=True)
@@ -191,7 +188,7 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
         else:
             st.info("暂无盈利交易")
 
-        # --- 5.3 风险与亏损 ---
+        # 4.3 风险与亏损
         st.markdown("###### 3. 风险与亏损 (仅统计亏损交易)")
         loss_count = len(losses)
         loss_rate = (loss_count / len(resale_df)) * 100
@@ -202,7 +199,6 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
         recent_loss_rate = (recent_losses / recent_total) * 100 if recent_total > 0 else 0
 
         c1, c2, c3, c4 = st.columns(4)
-        # 使用 red 风格
         with c1: st.markdown(kpi_card("亏损笔数", f"{loss_count} 笔", f"占比 {loss_rate:.1f}%", color="red"), unsafe_allow_html=True)
         with c2: st.markdown(kpi_card("近5年亏损占比", f"{recent_loss_rate:.1f}%", f"vs Hist: {loss_rate:.1f}%", color="red"), unsafe_allow_html=True)
         
@@ -213,7 +209,7 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
             with c3: st.markdown(kpi_card("平均亏损", "-", color="red"), unsafe_allow_html=True)
             with c4: st.markdown(kpi_card("最大亏损", "-", color="red"), unsafe_allow_html=True)
 
-        # --- 5.4 详情 ---
+        # 4.4 详情
         st.markdown("###### 4. 详细表现")
         tab_type, tab_blk = st.tabs(["按户型", "按楼栋"])
         
@@ -226,7 +222,6 @@ def render(df, chart_color='#1f77b4', chart_font_size=12, inventory_map=None):
 
         with tab_blk:
             sum_blk = resale_df.groupby('BLK').agg({'Gain': ['count', 'mean', 'max', 'min'], 'Annualized': 'mean', 'Hold_Years': 'mean'}).reset_index()
-            # 🟢 严谨排序
             sorted_blks = sorted(sum_blk['BLK'].unique().tolist(), key=natural_key)
             sum_blk['BLK'] = pd.Categorical(sum_blk['BLK'], categories=sorted_blks, ordered=True)
             sum_blk = sum_blk.sort_values('BLK')
