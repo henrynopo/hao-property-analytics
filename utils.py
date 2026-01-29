@@ -181,4 +181,118 @@ def get_dynamic_floor_premium(df, category):
                 if -0.005 < rate < 0.03: rates.append(rate)
     if len(rates) >= 3:
         fitted_rate = float(np.median(rates))
-        return max(0.0
+        return max(0.001, min(0.015, fitted_rate))
+    else:
+        return 0.005
+
+def calculate_ssd_status(purchase_date):
+    now, p_dt = datetime.now(), pd.to_datetime(purchase_date)
+    held_years = (now - p_dt).days / 365.25
+    rate, emoji, text = 0.0, "🟢", "SSD Free"
+    if p_dt >= datetime(2025, 7, 4):
+        if held_years < 1: rate, emoji, text = 0.16, "🔴", "SSD 16%"
+        elif held_years < 2: rate, emoji, text = 0.12, "🔴", "SSD 12%"
+        elif held_years < 3: rate, emoji, text = 0.08, "🔴", "SSD 8%"
+        elif held_years < 4: rate, emoji, text = 0.04, "🔴", "SSD 4%"
+    elif p_dt >= datetime(2017, 3, 11):
+        if held_years < 1: rate, emoji, text = 0.12, "🔴", "SSD 12%"
+        elif held_years < 2: rate, emoji, text = 0.08, "🔴", "SSD 8%"
+        elif held_years < 3: rate, emoji, text = 0.04, "🔴", "SSD 4%"
+    return rate, emoji, text
+
+def get_market_trend_model(df):
+    df_clean = df.dropna(subset=['Sale PSF', 'Date_Ordinal']).copy()
+    if len(df_clean) < 10: return None, 0 
+    q1 = df_clean['Sale PSF'].quantile(0.10)
+    q3 = df_clean['Sale PSF'].quantile(0.90)
+    df_clean = df_clean[(df_clean['Sale PSF'] >= q1) & (df_clean['Sale PSF'] <= q3)]
+    x = df_clean['Date_Ordinal'].values
+    y = df_clean['Sale PSF'].values
+    coeffs = np.polyfit(x, y, 1) 
+    trend_func = np.poly1d(coeffs)
+    y_pred = trend_func(x)
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+    return trend_func, r2
+
+def calculate_avm(df, blk, stack, floor):
+    target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
+    if not target_unit.empty:
+        subject_area = target_unit['Area (sqft)'].iloc[0]
+        subject_cat = target_unit['Category'].iloc[0]
+        last_tx = target_unit.sort_values('Sale Date', ascending=False).iloc[0]
+        last_price_psf = last_tx['Sale PSF']
+        last_tx_date = last_tx['Sale Date']
+    else:
+        neighbors = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
+        if not neighbors.empty:
+            subject_area = neighbors['Area (sqft)'].mode()[0]
+            subject_cat = neighbors['Category'].iloc[0]
+            last_price_psf = None
+            last_tx_date = None
+        else:
+            return None, None, None, None, None, pd.DataFrame(), None
+
+    last_date = df['Sale Date'].max()
+    cutoff_date = last_date - timedelta(days=365)
+    comps = df[(df['Category'] == subject_cat) & (df['Sale Date'] >= cutoff_date) & (~df['Is_Special']) & (df['Area (sqft)'] >= subject_area * 0.85) & (df['Area (sqft)'] <= subject_area * 1.15)].copy()
+    if len(comps) < 3:
+        comps = df[(df['Category'] == subject_cat) & (~df['Is_Special'])].sort_values('Sale Date', ascending=False).head(10)
+    if comps.empty: return subject_area, 0, 0, 0, 0.005, pd.DataFrame(), subject_cat
+
+    trend_func, r2 = get_market_trend_model(df)
+    current_date_ordinal = last_date.toordinal()
+    use_trend = trend_func is not None and r2 > 0.1
+    
+    def adjust_psf(row):
+        if not use_trend: return row['Sale PSF']
+        sale_ordinal = row['Sale Date'].toordinal()
+        pred_then = trend_func(sale_ordinal)
+        pred_now = trend_func(current_date_ordinal)
+        if pred_then <= 0: return row['Sale PSF']
+        ratio = pred_now / pred_then
+        ratio = max(0.8, min(1.2, ratio))
+        return row['Sale PSF'] * ratio
+
+    comps['Adj_PSF'] = comps.apply(adjust_psf, axis=1)
+    premium_rate = get_dynamic_floor_premium(df, subject_cat)
+    base_psf = comps['Adj_PSF'].median()
+    base_floor = comps['Floor_Num'].median()
+    floor_diff = floor - base_floor
+    adjustment_factor = 1 + (floor_diff * premium_rate)
+    model_psf = base_psf * adjustment_factor
+    final_psf = model_psf
+    if last_price_psf is not None:
+        years_since_tx = (last_date - last_tx_date).days / 365.25
+        if years_since_tx < 3: 
+            conservative_growth_factor = (1.01) ** years_since_tx
+            adjusted_hist_psf = last_price_psf * conservative_growth_factor
+            if model_psf < adjusted_hist_psf: final_psf = adjusted_hist_psf
+    
+    valuation = subject_area * final_psf
+    comps_display = comps.sort_values('Sale Date', ascending=False).head(5)
+    comps_display['Sale Date'] = comps_display['Sale Date'].dt.date
+    if 'Unit' not in comps_display.columns:
+        comps_display['Unit'] = comps_display.apply(lambda x: f"#{int(x['Floor_Num']):02d}-{x['Stack']}", axis=1)
+    cols_to_keep = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF', 'Adj_PSF']
+    cols_to_keep = [c for c in cols_to_keep if c in comps_display.columns]
+    comps_display = comps_display[cols_to_keep]
+    return subject_area, final_psf, valuation, floor_diff, premium_rate, comps_display, subject_cat
+
+def calculate_resale_metrics(df):
+    if 'Unit_ID' not in df.columns: return pd.DataFrame()
+    df_sorted = df.sort_values(['Unit_ID', 'Sale Date'])
+    df_sorted['Prev_Price'] = df_sorted.groupby('Unit_ID')['Sale Price'].shift(1)
+    df_sorted['Prev_Date'] = df_sorted.groupby('Unit_ID')['Sale Date'].shift(1)
+    resales = df_sorted.dropna(subset=['Prev_Price']).copy()
+    sale_type_col = next((c for c in df.columns if 'Type of Sale' in c or 'Sale Type' in c), None)
+    if sale_type_col:
+        mask = resales[sale_type_col].astype(str).str.strip().apply(lambda x: any(t.lower() in x.lower() for t in ['resale', 'sub sale', 'resales', 'subsales']))
+        resales = resales[mask]
+    if resales.empty: return pd.DataFrame()
+    resales['Gain'] = resales['Sale Price'] - resales['Prev_Price']
+    resales['Hold_Days'] = (resales['Sale Date'] - resales['Prev_Date']).dt.days
+    resales['Hold_Years'] = resales['Hold_Days'] / 365.25
+    resales['Annualized'] = (resales['Sale Price'] / resales['Prev_Price']) ** (1 / resales['Hold_Years'].replace(0, 0.01)) - 1
+    return resales
