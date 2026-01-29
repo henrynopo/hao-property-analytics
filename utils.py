@@ -7,7 +7,6 @@ import re
 import streamlit as st
 
 # ==================== 1. 个人品牌与项目配置 ====================
-# 🟢 读取个人信息 (带默认值防崩)
 try:
     AGENT_PROFILE = dict(st.secrets["agent"])
 except Exception:
@@ -21,10 +20,8 @@ except Exception:
         "Email": "henry.guo@huttons.com"
     }
 
-# 🟢 读取项目配置 (带默认值防崩)
 try:
     project_config = dict(st.secrets["projects"])
-    # 过滤掉 "None" 字符串
     cleaned_config = {k: (None if v == "None" else v) for k, v in project_config.items()}
     PROJECTS = cleaned_config
 except Exception:
@@ -42,7 +39,6 @@ def format_currency(val):
 
 @st.cache_data(ttl=300)
 def load_data(file_or_url):
-    """读取数据并智能清洗"""
     try:
         if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
         try:
@@ -99,29 +95,35 @@ def mark_penthouse(df):
     medians = df.groupby('Category')['Area (sqft)'].median()
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
-# ==================== 3. 业务算法 (已修复库存计算) ====================
+# ==================== 3. 业务算法 (完全回滚至 V46 版本) ====================
 
-# 🟢 修复：恢复高精度库存算法
 def estimate_inventory(df, category_col='Category'):
-    # 1. 基础检查
+    # 1. 简单模式检查
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
         return {}
-    
-    # 2. 准备数据
-    df = df.dropna(subset=['Floor_Num']).copy()
-    if df.empty: return {}
+    if 'Stack' not in df.columns:
+        # 如果没有 Stack 列，直接统计各类别的出现次数
+        inv_map = {}
+        for cat in df[category_col].unique():
+            inv_map[cat] = len(df[df[category_col] == cat])
+        return inv_map
 
-    # 3. 计算每个户型的“理论最高楼层” (Benchmark)
-    # 排除 Penthouse 干扰，获取每类户型的标准最高层数
+    df = df.dropna(subset=['Floor_Num']).copy()
+    
+    # 2. 计算基准楼层 (Benchmark)
     cat_benchmark_floors = {}
     for cat in df[category_col].unique():
         cat_df = df[df[category_col] == cat]
-        std_df = cat_df[~cat_df['Is_Special']] 
-        # 如果该分类没有普通单位，则取全部单位最大值
-        max_floor = std_df['Floor_Num'].max() if not std_df.empty else cat_df['Floor_Num'].max()
-        cat_benchmark_floors[cat] = max_floor if pd.notnull(max_floor) else 1
+        # 排除 Penthouse 干扰 (依赖 app.py 传入的 Is_Special)
+        if 'Is_Special' in df.columns:
+            std_df = cat_df[~cat_df['Is_Special']] 
+        else:
+            std_df = cat_df
+            
+        max_floor = std_df['Floor_Num'].max() if not std_df.empty else 1
+        cat_benchmark_floors[cat] = max_floor
     
-    # 4. 逐个 Stack 精确计算
+    # 3. 逐个 Stack 计算
     stack_inventory_map = {}
     unique_stacks = df[['BLK', 'Stack']].drop_duplicates()
     
@@ -130,47 +132,50 @@ def estimate_inventory(df, category_col='Category'):
         stack = row['Stack']
         stack_df = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
         
-        # 获取该 Stack 的物理最高层
+        # 物理最高层
         local_floors_set = set(df[df['BLK'] == blk]['Floor_Num'].unique())
         local_max = max(local_floors_set) if local_floors_set else 0
+        final_count = len(local_floors_set) # 默认：有多少算多少
         
-        # 确定该 Stack 的主导户型
+        # 确定主导户型
         if not stack_df.empty:
             dominant_cat = stack_df[category_col].mode()[0]
         else:
             dominant_cat = "Unknown"
         
-        # 智能推断：如果观测层数远低于基准，可能是数据缺失，用基准补齐
+        # 智能推断逻辑 (V46 原版)
         benchmark = cat_benchmark_floors.get(dominant_cat, local_max)
-        final_count = len(local_floors_set) # 默认：有多少算多少
-        
-        # 补全逻辑：如果当前最高层 < 基准-2，且看起来不是低层建筑，则采用基准值
         if (local_max < benchmark - 2) and (local_max > benchmark * 0.5):
              final_count = int(benchmark)
-        elif local_max > 0:
-             final_count = int(local_max)
 
         stack_inventory_map[(blk, stack)] = {
             'count': final_count,
             'category': dominant_cat
         }
 
-    # 5. 汇总
+    # 4. 汇总
     category_totals = {}
+    # 先初始化所有类别为0，防止漏掉
+    for cat in df[category_col].unique():
+        category_totals[cat] = 0
+        
     for info in stack_inventory_map.values():
         cat = info['category']
         count = info['count']
         category_totals[cat] = category_totals.get(cat, 0) + count
-        
+            
     return category_totals
 
 def get_dynamic_floor_premium(df, category):
     cat_df = df[df['Category'] == category].copy()
     if cat_df.empty: return 0.005
+    
     recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
     recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
+    
     grouped = recent_df.groupby(['BLK', 'Stack'])
     rates = []
+    
     for _, group in grouped:
         if len(group) < 2: continue
         recs = group.to_dict('records')
@@ -180,10 +185,13 @@ def get_dynamic_floor_premium(df, category):
                 if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
                 floor_diff = r1['Floor_Num'] - r2['Floor_Num']
                 if floor_diff == 0: continue
+                
                 if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
                 else: high, low, f_delta = r2, r1, -floor_diff
+                
                 rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
                 if -0.005 < rate < 0.03: rates.append(rate)
+
     if len(rates) >= 3:
         fitted_rate = float(np.median(rates))
         return max(0.001, min(0.015, fitted_rate))
@@ -194,8 +202,6 @@ def calculate_ssd_status(purchase_date):
     now, p_dt = datetime.now(), pd.to_datetime(purchase_date)
     held_years = (now - p_dt).days / 365.25
     rate, emoji, text = 0.0, "🟢", "SSD Free"
-    
-    # 2025 新政逻辑
     if p_dt >= datetime(2025, 7, 4):
         if held_years < 1: rate, emoji, text = 0.16, "🔴", "SSD 16%"
         elif held_years < 2: rate, emoji, text = 0.12, "🔴", "SSD 12%"
@@ -226,81 +232,4 @@ def get_market_trend_model(df):
 def calculate_avm(df, blk, stack, floor):
     target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
     if not target_unit.empty:
-        subject_area = target_unit['Area (sqft)'].iloc[0]
-        subject_cat = target_unit['Category'].iloc[0]
-        last_tx = target_unit.sort_values('Sale Date', ascending=False).iloc[0]
-        last_price_psf = last_tx['Sale PSF']
-        last_tx_date = last_tx['Sale Date']
-    else:
-        neighbors = df[(df['BLK'] == blk) & (df['Stack'] == stack)]
-        if not neighbors.empty:
-            subject_area = neighbors['Area (sqft)'].mode()[0]
-            subject_cat = neighbors['Category'].iloc[0]
-            last_price_psf = None
-            last_tx_date = None
-        else:
-            return None, None, None, None, None, pd.DataFrame(), None
-
-    last_date = df['Sale Date'].max()
-    cutoff_date = last_date - timedelta(days=365)
-    
-    comps = df[(df['Category'] == subject_cat) & (df['Sale Date'] >= cutoff_date) & (~df['Is_Special']) & (df['Area (sqft)'] >= subject_area * 0.85) & (df['Area (sqft)'] <= subject_area * 1.15)].copy()
-    if len(comps) < 3:
-        comps = df[(df['Category'] == subject_cat) & (~df['Is_Special'])].sort_values('Sale Date', ascending=False).head(10)
-    if comps.empty: return subject_area, 0, 0, 0, 0.005, pd.DataFrame(), subject_cat
-
-    trend_func, r2 = get_market_trend_model(df)
-    current_date_ordinal = last_date.toordinal()
-    use_trend = trend_func is not None and r2 > 0.1
-    
-    def adjust_psf(row):
-        if not use_trend: return row['Sale PSF']
-        sale_ordinal = row['Sale Date'].toordinal()
-        pred_then = trend_func(sale_ordinal)
-        pred_now = trend_func(current_date_ordinal)
-        if pred_then <= 0: return row['Sale PSF']
-        ratio = pred_now / pred_then
-        ratio = max(0.8, min(1.2, ratio))
-        return row['Sale PSF'] * ratio
-
-    comps['Adj_PSF'] = comps.apply(adjust_psf, axis=1)
-    premium_rate = get_dynamic_floor_premium(df, subject_cat)
-    base_psf = comps['Adj_PSF'].median()
-    base_floor = comps['Floor_Num'].median()
-    floor_diff = floor - base_floor
-    adjustment_factor = 1 + (floor_diff * premium_rate)
-    model_psf = base_psf * adjustment_factor
-    final_psf = model_psf
-    if last_price_psf is not None:
-        years_since_tx = (last_date - last_tx_date).days / 365.25
-        if years_since_tx < 3: 
-            conservative_growth_factor = (1.01) ** years_since_tx
-            adjusted_hist_psf = last_price_psf * conservative_growth_factor
-            if model_psf < adjusted_hist_psf: final_psf = adjusted_hist_psf
-    
-    valuation = subject_area * final_psf
-    comps_display = comps.sort_values('Sale Date', ascending=False).head(5)
-    comps_display['Sale Date'] = comps_display['Sale Date'].dt.date
-    if 'Unit' not in comps_display.columns:
-        comps_display['Unit'] = comps_display.apply(lambda x: f"#{int(x['Floor_Num']):02d}-{x['Stack']}", axis=1)
-    cols_to_keep = ['Sale Date', 'BLK', 'Unit', 'Category', 'Area (sqft)', 'Sale Price', 'Sale PSF', 'Adj_PSF']
-    cols_to_keep = [c for c in cols_to_keep if c in comps_display.columns]
-    comps_display = comps_display[cols_to_keep]
-    return subject_area, final_psf, valuation, floor_diff, premium_rate, comps_display, subject_cat
-
-def calculate_resale_metrics(df):
-    if 'Unit_ID' not in df.columns: return pd.DataFrame()
-    df_sorted = df.sort_values(['Unit_ID', 'Sale Date'])
-    df_sorted['Prev_Price'] = df_sorted.groupby('Unit_ID')['Sale Price'].shift(1)
-    df_sorted['Prev_Date'] = df_sorted.groupby('Unit_ID')['Sale Date'].shift(1)
-    resales = df_sorted.dropna(subset=['Prev_Price']).copy()
-    sale_type_col = next((c for c in df.columns if 'Type of Sale' in c or 'Sale Type' in c), None)
-    if sale_type_col:
-        mask = resales[sale_type_col].astype(str).str.strip().apply(lambda x: any(t.lower() in x.lower() for t in ['resale', 'sub sale', 'resales', 'subsales']))
-        resales = resales[mask]
-    if resales.empty: return pd.DataFrame()
-    resales['Gain'] = resales['Sale Price'] - resales['Prev_Price']
-    resales['Hold_Days'] = (resales['Sale Date'] - resales['Prev_Date']).dt.days
-    resales['Hold_Years'] = resales['Hold_Days'] / 365.25
-    resales['Annualized'] = (resales['Sale Price'] / resales['Prev_Price']) ** (1 / resales['Hold_Years'].replace(0, 0.01)) - 1
-    return resales
+        subject_area = target_unit['Area (sqft)'].
