@@ -95,61 +95,59 @@ def mark_penthouse(df):
     medians = df.groupby('Category')['Area (sqft)'].median()
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
-# ==================== 3. 业务算法 (V59 全局网格推断版) ====================
+# ==================== 3. 业务算法 (V60 智能跳层识别版) ====================
 
 def estimate_inventory(df, category_col='Category'):
-    # 1. 基础检查
-    if 'BLK' not in df.columns or 'Floor_Num' not in df.columns:
-        return {}
+    if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: return {}
     if 'Stack' not in df.columns:
-        # 如果没有 Stack 列，退化为简单计数
         inv_map = {}
         for cat in df[category_col].unique():
             inv_map[cat] = len(df[df[category_col] == cat])
         return inv_map
 
-    # 使用 copy 防止影响原始数据
     df = df.dropna(subset=['Floor_Num']).copy()
-    
-    # 初始化统计字典
     final_totals = {cat: 0 for cat in df[category_col].unique()}
-    
-    # 🟢 V59 核心逻辑：按 Block 遍历，实施“网格化”统计
-    # 这与 Tower View (Tab 2) 的渲染逻辑完全一致
     
     unique_blocks = df['BLK'].unique()
     
     for blk in unique_blocks:
         blk_df = df[df['BLK'] == blk]
         
-        # 1. 获取该栋楼的“物理高度” (Min 到 Max)
+        # 🟢 1. 智能步长检测 (Step Detection)
+        # 找出该栋楼所有出现过的楼层
+        floors = sorted(blk_df['Floor_Num'].dropna().unique())
+        
+        step = 1 # 默认为平层
+        if len(floors) >= 2:
+            # 计算楼层间的差距: [2, 4, 6] -> diffs=[2, 2] -> mode=2
+            diffs = np.diff(floors)
+            # 只看 1, 2, 3 这种常规间距，忽略因为数据缺失导致的大间距
+            valid_diffs = [d for d in diffs if d <= 3]
+            if valid_diffs:
+                # 取出现最频繁的间距
+                mode_step = int(pd.Series(valid_diffs).mode()[0])
+                if mode_step > 1:
+                    step = mode_step
+        
+        # 2. 获取物理高度
         min_f = int(blk_df['Floor_Num'].min())
         max_f = int(blk_df['Floor_Num'].max())
         if min_f < 1: min_f = 1
         
-        # 计算该栋楼每列应有的层数 (例如 1~25楼 = 25层)
-        block_height = max_f - min_f + 1
+        # 🟢 3. 计算修正后的单列户数
+        # 公式: (顶层 - 底层) / 步长 + 1
+        # 例如: 2~24楼, 步长2 -> (24-2)/2 + 1 = 11+1 = 12户 (正确)
+        # 之前V59: 24-2+1 = 23户 (错误)
+        block_height_count = int((max_f - min_f) // step) + 1
         
-        # 2. 获取该栋楼的所有 Stack
         unique_stacks = blk_df['Stack'].unique()
-        
         for stack in unique_stacks:
             stack_df = blk_df[blk_df['Stack'] == stack]
-            
-            # 确定该 Stack 的户型 (Category)
             if not stack_df.empty:
-                # 取出现次数最多的户型作为该列的代表
                 dominant_cat = stack_df[category_col].mode()[0]
-            else:
-                continue # 理论上不会发生，因为是从 unique_stacks 取的
-            
-            # 🟢 统计：直接使用“栋楼高度”作为该 Stack 的库存
-            # 即使该 Stack 只有几条成交记录，也认为它拥有完整的楼层
-            final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + block_height
+                final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + block_height_count
 
-    # 🟢 兜底检查
-    # 防止因为数据清洗导致某些 Category 变为 0
-    # 规则：统计值不能小于实际观测到的 Unit_ID 数量
+    # 4. 兜底逻辑
     observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
     for cat in final_totals:
         estimated = final_totals[cat]
