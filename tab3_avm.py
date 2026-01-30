@@ -12,15 +12,16 @@ def clean_and_prepare_data(df_raw):
     """
     df = df_raw.copy()
     
-    # 1. 列名映射字典
+    # 1. 列名映射字典 (新增 Bedroom Type)
     rename_map = {
         'Transacted Price ($)': 'Sale Price',
         'Area (SQFT)': 'Area (sqft)',
         'Unit Price ($ psf)': 'Unit Price ($ psf)',
         'Unit Price ($ psm)': 'Unit Price ($ psm)',
         'Sale Date': 'Sale Date',
-        'No. of Bedroom': 'Type', 
-        'Property Type': 'Type'
+        'Bedroom Type': 'Type',   # <--- 核心修复：精准匹配您的数据列名
+        'No. of Bedroom': 'Type', # 兼容旧格式
+        'Property Type': 'Type'   # 备选
     }
     df.rename(columns=rename_map, inplace=True)
     
@@ -42,11 +43,9 @@ def clean_and_prepare_data(df_raw):
 
 # --- 辅助：格式化单元号 ---
 def format_unit(floor, stack):
-    # 尝试转为数字进行格式化 (#05-04)，如果失败则原样返回
     try:
         f_num = int(float(floor))
         s_str = str(stack)
-        # 如果 stack 是纯数字，补0；如果是 10A 这种，不补
         s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
         return f"#{f_num:02d}-{s_fmt}"
     except:
@@ -241,7 +240,7 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     comp_display['Sale Price'] = comp_display['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
     comp_display['Unit Price ($ psf)'] = comp_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
     
-    # 修复：使用 apply 进行强类型拼接，防止 TypeError
+    # 使用安全的格式化拼接
     comp_display['Unit'] = comp_display.apply(
         lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
         axis=1
