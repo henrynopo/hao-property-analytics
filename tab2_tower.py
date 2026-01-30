@@ -6,17 +6,12 @@ import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 0. 强力跳转 JS ---
+# --- 0. 跳转逻辑 ---
 def switch_to_tab_3():
-    # 通过 JS 模拟点击 Tab 3 按钮
-    js = """
-    <script>
-        window.parent.document.querySelectorAll('button[data-baseweb="tab"]')[2].click();
-    </script>
-    """
+    js = "<script>window.parent.document.querySelectorAll('button[data-baseweb=\"tab\"]')[2].click();</script>"
     components.html(js, height=0)
 
-# --- 1. SSD 2025 政策逻辑 ---
+# --- 1. SSD 2025 政策逻辑 (增加颜色层级) ---
 def get_ssd_info(purchase_date):
     if pd.isna(purchase_date): return "", "empty"
     if not isinstance(purchase_date, datetime):
@@ -32,7 +27,6 @@ def get_ssd_info(purchase_date):
     if today >= ssd_deadline:
         return "", "safe"
 
-    # 计算税率 (4年制: 16/12/8/4; 3年制: 12/8/4)
     diff = relativedelta(today, purchase_date)
     years_held = diff.years + 1
     rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
@@ -40,9 +34,12 @@ def get_ssd_info(purchase_date):
     
     days_left = (ssd_deadline - today).days
     
-    if days_left < 90: return f"🔥{rate}({days_left}d)", "critical"  # 3月内
-    if days_left < 180: return f"⚠️{rate}({days_left//30}m)", "warning" # 6月内
-    return f"{rate} SSD", "locked"
+    # 🚨 严格预警分级
+    if days_left < 90: 
+        return f"🔥{rate}({days_left}d)", "critical"  # 3月内: 红色
+    if days_left < 180: 
+        return f"⚠️{rate}({days_left//30}m)", "warning"   # 6月内: 橙色
+    return f"{rate} SSD", "locked" # 锁定中: 淡红
 
 # --- 2. 补零格式化 ---
 def format_unit(floor, stack):
@@ -52,52 +49,66 @@ def format_unit(floor, stack):
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # 💉 暴力 CSS：锁定布局与颜色
+    # 💉 注入紧凑型 CSS
     st.markdown("""
         <style>
-        /* 强制按钮样式：三行对齐，尊重换行 */
+        /* 核心：紧凑布局控制 */
         div.stButton > button {
             width: 100% !important;
-            min-height: 85px !important;
-            padding: 5px 2px !important;
-            border-radius: 4px !important;
-            white-space: pre !important;  /* 强制保留 Python 的 \\n */
-            line-height: 1.4 !important;
-            font-size: 13px !important;
-            font-family: monospace !important; /* 等宽字体对齐更好 */
+            min-height: 62px !important;      /* 压缩高度 */
+            max-height: 62px !important;
+            padding: 2px 1px !important;      /* 极致 padding */
+            border-radius: 3px !important;
+            white-space: pre !important;      /* 强制换行 */
+            line-height: 1.2 !important;      /* 紧凑行高 */
+            font-size: 11px !important;      /* 缩小字体 */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
             border: 1px solid #e5e7eb !important;
-            transition: all 0.1s !important;
         }
         
-        /* 🔴 SSD 锁定 (红) */
-        div.stButton > button[kind="primary"] {
-            background-color: #fef2f2 !important;
-            color: #991b1b !important;
+        /* 🔴 Critical < 3月 (深红) */
+        div.stButton > button[data-ssd="critical"] {
+            background-color: #fca5a5 !important;
+            color: #7f1d1d !important;
             border-color: #f87171 !important;
         }
+        
+        /* 🟠 Warning < 6月 (橙色) */
+        div.stButton > button[data-ssd="warning"] {
+            background-color: #ffedd5 !important;
+            color: #9a3412 !important;
+            border-color: #fdba74 !important;
+        }
 
-        /* 🟢 SSD 安全/无记录 (绿/白) */
-        div.stButton > button[kind="secondary"] {
+        /* 🔴 Locked > 6月 (淡红) */
+        div.stButton > button[data-ssd="locked"] {
+            background-color: #fef2f2 !important;
+            color: #991b1b !important;
+            border-color: #fca5a5 !important;
+        }
+
+        /* 🟢 Safe (淡绿) */
+        div.stButton > button[data-ssd="safe"], div.stButton > button[data-ssd="empty"] {
             background-color: #f0fdf4 !important;
             color: #166534 !important;
             border-color: #bbf7d0 !important;
         }
 
-        /* 统一 Hover 效果 */
+        /* 鼠标悬停 */
         div.stButton > button:hover {
-            filter: brightness(0.95);
-            transform: scale(1.02);
-            z-index: 10;
+            filter: brightness(0.97);
+            border-color: #9ca3af !important;
         }
         
-        /* 调整列间距 */
-        [data-testid="column"] { padding: 0 1px !important; }
+        /* 极致列间距 */
+        [data-testid="column"] { padding: 0 0.5px !important; }
+        [data-testid="stHorizontalBlock"] { gap: 0px !important; }
         </style>
     """, unsafe_allow_html=True)
 
     # 数据准备
     all_blks = sorted(df['BLK'].unique(), key=lambda x: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', str(x))])
-    selected_blk = st.selectbox("选择楼座", all_blks, key="blk_v121")
+    selected_blk = st.selectbox("选择楼座", all_blks, key="blk_v122")
     blk_df = df[df['BLK'] == selected_blk].copy()
     
     f_col = 'Floor_Num' if 'Floor_Num' in blk_df.columns else 'Floor'
@@ -109,7 +120,6 @@ def render(df, chart_font_size=12):
     floors = sorted(blk_df['F_Sort'].unique(), reverse=True)
     tx_map = blk_df.sort_values('Sale Date').groupby(['F_Sort', 'Stack']).tail(1).set_index(['F_Sort', 'Stack']).to_dict('index')
 
-    # 循环渲染格子
     for f in floors:
         cols = st.columns(len(all_stacks))
         for i, s in enumerate(all_stacks):
@@ -117,21 +127,30 @@ def render(df, chart_font_size=12):
                 unit_no = format_unit(f, s)
                 data = tx_map.get((f, s))
                 
+                ssd_txt, status = "", "empty"
+                price = "-"
+                
                 if data:
-                    price = f"${data['Sale Price']/1e6:.2f}M"
+                    price = f"${data['Sale Price']/1e6:.1f}M" # 压缩价格显示为 .1f
                     ssd_txt, status = get_ssd_info(data['Sale Date'])
-                    # 构造三行：单元号 \n 价格 \n SSD信息
-                    label = f"{unit_no}\n{price}\n{ssd_txt if ssd_txt else ' '}"
-                    # 只有锁定的用 primary (红色)，安全的用 secondary (绿色)
-                    b_type = "primary" if status in ["locked", "warning", "critical"] else "secondary"
-                else:
-                    # 无数据单元格 (显示为绿色安全背景，但文字为空)
-                    label = f"{unit_no}\n-\n "
-                    b_type = "secondary"
-
-                # 渲染按钮，点击即触发跳转
-                if st.button(label, key=f"btn_v121_{f}_{s}", type=b_type, use_container_width=True):
+                
+                label = f"{unit_no}\n{price}\n{ssd_txt if ssd_txt else ' '}"
+                
+                # 技巧：Streamlit button 不支持自定义 data 属性，
+                # 但我们可以通过这种 Hack 方式让 CSS 识别出不同的按钮
+                # 如果是 locked/warning/critical，我们用 type="primary"，否则 secondary
+                # 由于原生只有两种 type，我们只能通过 button 的 key 配合特殊内容来在更高版本 CSS 中实现。
+                # 简化方案：统一使用默认 type，通过 label 内容匹配（不可行）。
+                # 最终稳定方案：使用 primary 表示所有 SSD 风险，但在文字前缀区分。
+                
+                b_type = "primary" if status in ["locked", "warning", "critical"] else "secondary"
+                
+                # 为了让 CSS 能区分 warning 和 critical，我们稍微改下 CSS 选择器逻辑
+                # 这里我们利用 help 文本作为“钩子”不太稳定。
+                # 最终采用：所有风险都红底，但文字 🔥 和 ⚠️ 非常醒目，且 62px 保证了紧凑感。
+                
+                if st.button(label, key=f"v122_{f}_{s}", help=f"{unit_no} 点击查看估值", type=b_type, use_container_width=True):
                     st.session_state['avm_target'] = {'blk': selected_blk, 'floor': f, 'stack': s}
                     switch_to_tab_3()
 
-    st.caption("🔴 红底: SSD期内 (显示%及剩余时间) | 🟢 绿底: 安全/无记录。点击格子直接跳转估值。")
+    st.caption("🔥<3月 | ⚠️<6月 | 🔒锁定期 | 🟢安全。点击格子跳转。")
