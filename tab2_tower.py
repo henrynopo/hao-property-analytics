@@ -1,10 +1,10 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import re
 import time
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from utils import format_unit, natural_key  # [V204] 引用通用工具
 
 # --- 0. 核心回调函数 ---
 
@@ -19,28 +19,7 @@ def go_to_valuation(blk, floor, stack):
 def select_block(blk):
     st.session_state.selected_blk = str(blk)
 
-# --- 1. 数据清洗与辅助 ---
-def clean_data(df_raw):
-    df = df_raw.copy()
-    rename_map = {
-        'Bedroom Type': 'Type',
-        'No. of Bedroom': 'Type',
-        'Area (SQFT)': 'Area (sqft)',
-        'Sale Date': 'Sale Date'
-    }
-    df.rename(columns=rename_map, inplace=True)
-    if 'Sale Date' in df.columns:
-        df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
-    
-    # 强制 BLK 列为字符串
-    df['BLK'] = df['BLK'].astype(str)
-    
-    # 户型列预处理，填充空值
-    if 'Type' not in df.columns: df['Type'] = "-"
-    df['Type'] = df['Type'].fillna("-").astype(str)
-    
-    return df
-
+# --- 1. SSD 计算逻辑 (保留本地，因属于特定 UI 逻辑) ---
 def calculate_ssd_info(purchase_date):
     if pd.isna(purchase_date): return "", "", 0
     if not isinstance(purchase_date, datetime): purchase_date = pd.to_datetime(purchase_date)
@@ -69,22 +48,17 @@ def calculate_ssd_info(purchase_date):
     
     return icon, rate_str, months_left
 
-def format_unit(floor, stack):
-    return f"#{int(floor):02d}-{str(stack).zfill(2) if str(stack).isdigit() else stack}"
-
-def natural_key(string_):
-    return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', str(string_))]
-
 def shorten_type(type_str):
-    # 增强型字符串处理
     if not isinstance(type_str, str): return "-"
     s = type_str.strip()
-    if s.lower() in ['nan', 'none', '', 'null', '0']: return "-"
+    if s.lower() in ['nan', 'none', '', 'null', '0', 'n/a']: return "-"
     return s.replace("Bedroom", "Bed").replace("Maisonette", "Mais").replace("Apartment", "Apt")
 
 # --- 2. 渲染主函数 ---
-def render(df_raw, chart_font_size=12):
-    df = clean_data(df_raw)
+def render(df, chart_font_size=12):
+    # [V204] 移除 clean_data，直接使用 app.py 传来的 df
+    # df 已经在 utils.load_data 中清洗过，包含 'Type', 'BLK'(str), 'Sale Date'(datetime)
+    
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
     # Block 状态管理
@@ -93,11 +67,10 @@ def render(df_raw, chart_font_size=12):
     elif str(st.session_state.selected_blk) not in all_blks:
         st.session_state.selected_blk = str(all_blks[0])
 
-    # 跳转逻辑
+    # 跳转逻辑 (保持不变)
     if st.session_state.get('trigger_tab_switch', False):
         js_code = f"""
         <script>
-            // Timestamp: {time.time()}
             var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
             if (tabs.length > 2) {{
                 tabs[2].click();
@@ -110,6 +83,7 @@ def render(df_raw, chart_font_size=12):
 
     st.subheader("🏢 楼宇透视 (Building View)")
     
+    # 样式 (保持不变)
     st.markdown("""
         <style>
         div.stButton > button {
@@ -154,15 +128,7 @@ def render(df_raw, chart_font_size=12):
                 is_selected = str(st.session_state.selected_blk) == str(blk)
                 b_type = "primary" if is_selected else "secondary"
                 label_text = f"🔴 {blk}" if is_selected else blk
-                
-                st.button(
-                    label_text, 
-                    key=f"blk_{blk}", 
-                    type=b_type, 
-                    use_container_width=True,
-                    on_click=select_block,
-                    args=(blk,)
-                )
+                st.button(label_text, key=f"blk_{blk}", type=b_type, use_container_width=True, on_click=select_block, args=(blk,))
 
     # Grid Render
     selected_blk = st.session_state.selected_blk
@@ -180,10 +146,8 @@ def render(df_raw, chart_font_size=12):
     for s in all_stacks:
         s_data = blk_df[blk_df['Stack'] == s]
         if not s_data.empty:
-            # 过滤掉无效值后再求众数
-            valid_types = s_data[~s_data['Type'].isin(['-', 'nan', 'NaN', '', '0'])]['Type']
+            valid_types = s_data[~s_data['Type'].isin(['-', 'nan', 'NaN', '', '0', 'N/A'])]['Type']
             mode_type = valid_types.mode()[0] if not valid_types.empty else "-"
-            
             mode_area = s_data['Area (sqft)'].mode()[0] if not s_data['Area (sqft)'].empty else 0
             stack_info_map[s] = {'type': mode_type, 'area': mode_area}
         else:
@@ -202,6 +166,7 @@ def render(df_raw, chart_font_size=12):
             cols = st.columns(len(current_stacks))
             for i, s in enumerate(current_stacks):
                 with cols[i]:
+                    # [V204] 使用 utils.format_unit
                     unit_no = format_unit(f, s)
                     tx_data = tx_map.get((f, s))
                     
@@ -219,27 +184,12 @@ def render(df_raw, chart_font_size=12):
 
                     area_str = f"{u_area:,}sf" if u_area > 0 else "-"
                     
-                    # [V183 布局优化]
-                    # Line 1: #05-01 🟩
-                    # Line 2: 3Bed | 1,216sf
-                    
-                    # 组合第一行：单元号 + SSD图标
                     line1 = unit_no
                     if ssd_icon: line1 += f" {ssd_icon}"
-                    
-                    # 组合第二行：户型 | 面积
                     line2 = f"{u_type} | {area_str}"
-                    
                     label = f"{line1}\n{line2}"
                     
-                    st.button(
-                        label, 
-                        key=f"btn_{selected_blk}_{f}_{s}", 
-                        type="secondary",
-                        use_container_width=True,
-                        on_click=go_to_valuation,
-                        args=(selected_blk, f, s)
-                    )
+                    st.button(label, key=f"btn_{selected_blk}_{f}_{s}", type="secondary", use_container_width=True, on_click=go_to_valuation, args=(selected_blk, f, s))
         if len(stack_chunks) > 1: st.divider()
 
     st.markdown("---")
@@ -251,36 +201,22 @@ def render(df_raw, chart_font_size=12):
         
         for _, row in latest_txs.iterrows():
             icon, rate_str, months_left = calculate_ssd_info(row['Sale Date'])
-            
-            unit_val = format_unit(row['Floor'], row['Stack'])
-            blk_val = row['BLK']
-            type_val = shorten_type(str(row['Type']))
-            area_val = f"{int(row['Area (sqft)']):,}sf"
-            
-            # 列表显示保持详细，但图标移到最前
-            label_str = f"{icon} {blk_val} | {unit_val} | {type_val} | {area_val} | {months_left}mths"
+            unit_val = format_unit(row['Floor'], row['Stack']) # [V204]
+            label_str = f"{icon} {row['BLK']} | {unit_val} | {shorten_type(str(row['Type']))} | {int(row['Area (sqft)']):,}sf | {months_left}mths"
             
             if "🟨" in icon:
-                opportunity_list.append({
-                    "label": label_str, 
-                    "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']
-                })
+                opportunity_list.append({"label": label_str, "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']})
             elif "🟧" in icon:
-                watchlist.append({
-                    "label": label_str,
-                    "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']
-                })
+                watchlist.append({"label": label_str, "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']})
 
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("##### 🟨 0-3月")
             if not opportunity_list: st.caption("暂无")
             for item in opportunity_list:
-                st.button(item['label'], key=f"opt_{item['blk']}_{item['f']}_{item['s']}", 
-                          on_click=go_to_valuation, args=(item['blk'], item['f'], item['s']))
+                st.button(item['label'], key=f"opt_{item['blk']}_{item['f']}_{item['s']}", on_click=go_to_valuation, args=(item['blk'], item['f'], item['s']))
         with c2:
             st.markdown("##### 🟧 3-6月")
             if not watchlist: st.caption("暂无")
             for item in watchlist:
-                st.button(item['label'], key=f"watch_{item['blk']}_{item['f']}_{item['s']}", 
-                          on_click=go_to_valuation, args=(item['blk'], item['f'], item['s']))
+                st.button(item['label'], key=f"watch_{item['blk']}_{item['f']}_{item['s']}", on_click=go_to_valuation, args=(item['blk'], item['f'], item['s']))
