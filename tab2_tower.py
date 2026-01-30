@@ -1,12 +1,26 @@
 # 文件名: tab2_tower.py
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import re
 import html
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 核心：SSD 计算器 ---
+# --- 0. 黑科技：强制跳转 Tab ---
+# Streamlit 原生不支持跳 Tab，这是通过 JS 模拟点击第 3 个 Tab (Index=2)
+def switch_to_tab_3():
+    js = """
+    <script>
+        var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+        if (tabs.length > 2) {
+            tabs[2].click();
+        }
+    </script>
+    """
+    components.html(js, height=0)
+
+# --- 1. SSD 计算核心 ---
 def check_ssd_status(purchase_date):
     if pd.isna(purchase_date): return False, "无数据", 0
     if not isinstance(purchase_date, datetime):
@@ -30,134 +44,138 @@ def check_ssd_status(purchase_date):
     
     if today < ssd_deadline:
         days_left = (ssd_deadline - today).days
-        short_status = f"🔒 SSD:{desc}"
-        full_msg = f"状态: 🔒 锁定期 ({desc})\n剩余: {days_left} 天\n解锁: {ssd_deadline.strftime('%Y-%m-%d')}"
-        return True, short_status, full_msg
+        short = f"🔒 SSD期内"
+        full = f"状态: 🔒 锁定期 ({desc})\n剩余: {days_left} 天\n解锁: {ssd_deadline.strftime('%Y-%m-%d')}"
+        return True, short, full
     else:
         return False, "✅ Free", "状态: ✅ SSD 已解禁"
 
+# --- 2. 辅助函数 ---
 def natural_key(string_):
     if not isinstance(string_, str): return [0]
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', string_)]
 
+# --- 3. 主渲染函数 ---
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
 
-    # 1. 筛选
+    # A. 筛选 Block
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
+    if not all_blks:
+        st.warning("数据为空")
+        return
     selected_blk = st.selectbox("选择楼座 (Block)", all_blks, key="tab2_blk_select")
     blk_df = df[df['BLK'] == selected_blk].copy()
 
-    # 2. 楼层排序与准备
+    # B. 构建骨架
     if 'Floor_Num' in blk_df.columns:
         blk_df['Floor_Sort'] = blk_df['Floor_Num'].fillna(0).astype(int)
     else:
         blk_df['Floor_Sort'] = blk_df['Floor'].astype(str).str.extract(r'(\d+)')[0].fillna(0).astype(int)
 
-    # 3. 构建完整骨架 (解决单元消失问题)
-    # 找出该楼座所有的 Stack (自然排序)
+    # 获取完整结构 (Min Floor -> Max Floor, All Stacks)
     all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
-    
-    # 找出楼层范围 (Min 到 Max)
-    # 注意：如果数据太少可能不准，但通常这是推断楼宇结构的最好方法
     if not blk_df.empty:
         min_floor = int(blk_df['Floor_Sort'].min())
         max_floor = int(blk_df['Floor_Sort'].max())
-        # 生成连续的楼层列表
-        all_floors = list(range(min_floor, max_floor + 1))
+        floors_desc = sorted(list(range(min_floor, max_floor + 1)), reverse=True)
     else:
-        all_floors = []
+        floors_desc = []
 
-    # 4. 取最新交易数据
-    latest_tx = blk_df.sort_values('Sale Date').groupby(['Floor_Sort', 'Stack']).tail(1)
+    # C. 准备交易数据
+    tx_map = {}
+    if not blk_df.empty:
+        latest_tx = blk_df.sort_values('Sale Date').groupby(['Floor_Sort', 'Stack']).tail(1)
+        for _, row in latest_tx.iterrows():
+            key = (int(row['Floor_Sort']), row['Stack'])
+            tx_map[key] = row
 
-    # 5. 生成 HTML
-    def make_cell_html(row):
-        # 如果是空数据(填充出来的)，row里全是NaN
-        if pd.isna(row['Sale Date']):
-            return None
-            
-        price = f"${row['Sale Price']/1e6:.2f}M"
-        psf = f"${row['Sale PSF']:,.0f}"
-        sale_date = row['Sale Date']
-        
-        is_locked, short_status, full_ssd_msg = check_ssd_status(sale_date)
-        
-        if is_locked:
-            bg_color = "#fee2e2"
-            border = "1px solid #f87171"
-            text_color = "#991b1b"
-            status_style = "color: #dc2626; font-weight: bold;"
-        else:
-            bg_color = "#ffffff"
-            border = "1px solid #e5e7eb"
-            text_color = "#1f2937"
-            status_style = "color: #059669;"
+    # D. 渲染网格
+    if not all_stacks:
+        st.info("该楼座无 Stack 信息")
+        return
 
-        raw_tooltip = f"成交日期: {sale_date.strftime('%Y-%m-%d')}\n总价: {price}\n尺价: {psf} psf\n{full_ssd_msg}"
-        safe_tooltip = html.escape(raw_tooltip, quote=True)
+    # 表头
+    cols = st.columns([0.6] + [1] * len(all_stacks))
+    with cols[0]:
+        st.markdown("<div style='text-align:right; font-weight:bold; font-size:12px; padding-top:8px;'>Floor</div>", unsafe_allow_html=True)
+    for i, stack in enumerate(all_stacks):
+        with cols[i+1]:
+            st.markdown(f"<div style='text-align:center; font-weight:bold; font-size:12px; border-bottom:1px solid #ddd; margin-bottom:5px;'>{stack}</div>", unsafe_allow_html=True)
 
-        return f"""
-        <div title="{safe_tooltip}" style="
-            background-color: {bg_color};
-            border: {border};
-            border-radius: 4px;
-            padding: 2px;
-            margin-bottom: 2px;
-            text-align: center;
-            height: 100%;
-            cursor: pointer;
-        ">
-            <div style="font-weight: 700; font-size: 13px; color: {text_color}; line-height: 1.1;">{price}</div>
-            <div style="font-size: 11px; color: #4b5563;">{psf}</div>
-            <div style="font-size: 10px; {status_style} margin-top:1px;">{short_status}</div>
-        </div>
-        """
-    
-    # 这里的 apply 可能会遇到全 NaN 的行，需要注意
-    # 我们先对 latest_tx 生成 display_html，此时只有有数据的行
-    latest_tx['display_html'] = latest_tx.apply(make_cell_html, axis=1)
+    # 循环生成楼层
+    for floor in floors_desc:
+        c_row = st.columns([0.6] + [1] * len(all_stacks))
+        
+        # 楼层号
+        with c_row[0]:
+            st.markdown(f"<div style='text-align:right; font-weight:bold; color:#666; font-size:12px; padding-top:15px;'>L{floor}</div>", unsafe_allow_html=True)
 
-    if not latest_tx.empty and all_floors:
-        # 6. 透视表与强制重索引 (核心修复步骤)
-        unit_grid = latest_tx.pivot(index='Floor_Sort', columns='Stack', values='display_html')
-        
-        # 强制使用完整的 Stack 列表作为列 (即使某些 Stack 没交易也要显示)
-        unit_grid = unit_grid.reindex(columns=all_stacks)
-        
-        # 强制使用完整的 Floor 列表作为索引 (即使某层没交易也要显示)
-        # 倒序排列：高层在上
-        unit_grid = unit_grid.reindex(index=sorted(all_floors, reverse=True))
-        
-        # 7. 渲染
-        # 动态列宽
-        cols = st.columns([0.6] + [1.2] * len(all_stacks))
-        
-        # 表头
-        with cols[0]:
-            st.markdown(f"<div style='font-size:12px; font-weight:bold; text-align:right; padding-right:8px;'>Floor</div>", unsafe_allow_html=True)
-        for i, stack_name in enumerate(all_stacks):
-            with cols[i+1]:
-                st.markdown(f"<div style='text-align: center; font-weight: bold; font-size:12px; border-bottom:1px solid #ccc;'>{stack_name}</div>", unsafe_allow_html=True)
+        # 循环每个 Stack
+        for i, stack in enumerate(all_stacks):
+            with c_row[i+1]:
+                # --- [按钮层] 单元号 (点击即跳转) ---
+                unit_label = f"#{floor:02d}-{stack}"
+                btn_key = f"btn_{selected_blk}_{floor}_{stack}"
+                
+                # 点击逻辑：
+                # 1. 设置目标单元到 Session State
+                # 2. 调用 JS 跳转到 Tab 3
+                if st.button(unit_label, key=btn_key, use_container_width=True):
+                    st.session_state['avm_target'] = {
+                        'blk': selected_blk,
+                        'floor': floor,
+                        'stack': stack
+                    }
+                    switch_to_tab_3() # <--- 触发跳转
 
-        # 表体
-        for floor_num, row in unit_grid.iterrows():
-            c_row = st.columns([0.6] + [1.2] * len(all_stacks))
-            
-            # 楼层号
-            with c_row[0]:
-                st.markdown(f"<div style='font-size:12px; font-weight:bold; color:#666; text-align:right; padding-right:8px; padding-top:12px;'>L{floor_num}</div>", unsafe_allow_html=True)
-            
-            # 单元格
-            for i, stack_name in enumerate(all_stacks):
-                content = row[stack_name]
-                with c_row[i+1]:
-                    if pd.isna(content):
-                        # 空白格：显示灰色占位符，表示该单元物理存在但无交易
-                        st.markdown("<div style='height: 50px; background-color: #f3f4f6; margin-bottom: 2px; border-radius:4px; border:1px dashed #d1d5db;'></div>", unsafe_allow_html=True)
+                # --- [数据层] 详情卡片 (悬停显示 Tooltip) ---
+                row_data = tx_map.get((floor, stack))
+                
+                if row_data is not None:
+                    # [有交易数据]
+                    price = f"${row_data['Sale Price']/1e6:.2f}M"
+                    psf = f"${row_data['Sale PSF']:,.0f}"
+                    s_date = row_data['Sale Date']
+                    is_locked, short_status, full_ssd_msg = check_ssd_status(s_date)
+                    
+                    # 配色
+                    if is_locked:
+                        bg = "#fee2e2"
+                        border = "1px solid #fca5a5"
+                        txt_c = "#991b1b"
+                        status_s = "color:#dc2626; font-weight:bold;"
                     else:
-                        st.markdown(content, unsafe_allow_html=True)
-                        
-        st.caption("注：灰色虚线框表示该单位在数据集中无历史交易记录，但根据楼宇结构推定存在。")
-    else:
-        st.info("该楼座暂无交易数据")
+                        bg = "#f0fdf4"
+                        border = "1px solid #bbf7d0"
+                        txt_c = "#166534"
+                        status_s = "color:#166534;"
+
+                    # 悬停 Tooltip
+                    raw_tip = f"成交: {s_date.strftime('%Y-%m-%d')}\n总价: {price}\n尺价: {psf} psf\n{full_ssd_msg}"
+                    safe_tip = html.escape(raw_tip, quote=True)
+                    
+                    st.markdown(f"""
+                    <div title="{safe_tip}" style="
+                        background-color: {bg}; border: {border}; border-radius: 4px;
+                        padding: 4px 2px; text-align: center; cursor: help; margin-top: -12px; z-index: 1; min-height: 45px;
+                    ">
+                        <div style="font-weight:700; font-size:11px; color:{txt_c};">{price}</div>
+                        <div style="font-size:10px; color:#555;">{psf}</div>
+                        <div style="font-size:9px; {status_s} margin-top:1px;">{short_status}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                else:
+                    # [无交易数据] (推定存在)
+                    # 依然显示占位符，提示用户可以点击上方按钮去估值
+                    st.markdown("""
+                    <div title="暂无历史交易记录。&#10;点击上方按钮可查看估值。" style="
+                        background-color: #f9fafb; border: 1px dashed #e5e7eb; border-radius: 4px;
+                        height: 48px; margin-top: -12px; display: flex; align-items: center; justify-content: center; cursor: help;
+                    ">
+                        <span style="font-size:10px; color:#ccc;">无记录</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+    st.caption("💡 操作提示：点击任意 **单元号按钮** (如 #05-01)，将直接跳转至【智能估值】页面查看该单位估值与详情。")
