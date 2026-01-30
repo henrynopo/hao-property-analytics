@@ -62,7 +62,7 @@ if df is not None:
         with st.spinner("正在智能推算全盘库存..."):
             estimated_counts = estimate_inventory(df, 'Category')
 
-    # 3. 渲染侧边栏输入框 (数据回填)
+    # 3. 渲染侧边栏输入框
     with inventory_container:
         st.write("---") 
         st.caption(f"📊 各分类总库存设定 ({len(unique_cats)} 类)")
@@ -88,20 +88,14 @@ if df is not None:
     st.title(f"🏙️ {project_name} 市场透视")
     st.caption(f"数据范围: {df['Sale Date'].min().date()} 至 {df['Sale Date'].max().date()} | 总交易: {len(df)} 宗")
 
-    # [修改] 增加第 5 个 Tab: "⚙️ 设定"
-    t1, t2, t3, t4, t5 = st.tabs([
-        "📊 市场概览", 
-        "🏢 楼宇透视", 
-        "💎 单元估值", 
-        "📝 成交记录", 
-        "⚙️ 设定"
-    ])
+    # [新增] Tab 5: ⚙️ 设定
+    t1, t2, t3, t4, t5 = st.tabs(["📊 市场概览", "🏢 楼宇透视", "💎 单元估值", "📝 成交记录", "⚙️ 设定"])
     
     with t1: tab1_market.render(df, chart_color, chart_font_size, inventory_map)
     with t2: tab2_tower.render(df, chart_font_size)
     with t3: tab3_avm.render(df, project_name, chart_font_size)
     with t4: tab4_history.render(df)
-    with t5: tab5_settings.render()  # [新增] 渲染 Tab 5
+    with t5: tab5_settings.render() # [新增]
 
 else:
     st.info("👈 请在左侧选择项目或上传 CSV 文件。")
