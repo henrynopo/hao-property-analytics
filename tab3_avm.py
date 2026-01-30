@@ -12,16 +12,16 @@ def clean_and_prepare_data(df_raw):
     """
     df = df_raw.copy()
     
-    # 1. 列名映射字典 (新增 Bedroom Type)
+    # 1. 列名映射字典
     rename_map = {
         'Transacted Price ($)': 'Sale Price',
         'Area (SQFT)': 'Area (sqft)',
         'Unit Price ($ psf)': 'Unit Price ($ psf)',
         'Unit Price ($ psm)': 'Unit Price ($ psm)',
         'Sale Date': 'Sale Date',
-        'Bedroom Type': 'Type',   # <--- 核心修复：精准匹配您的数据列名
-        'No. of Bedroom': 'Type', # 兼容旧格式
-        'Property Type': 'Type'   # 备选
+        'Bedroom Type': 'Type',   
+        'No. of Bedroom': 'Type', 
+        'Property Type': 'Type'   
     }
     df.rename(columns=rename_map, inplace=True)
     
@@ -103,7 +103,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     return est_price, est_psf, type_tag, recent_comps, est_area
 
-# --- 渲染仪表盘 ---
+# --- 渲染仪表盘 (视觉优化) ---
 def render_gauge(est_psf, min_psf, max_psf, font_size=12):
     if min_psf == max_psf:
         min_psf = est_psf * 0.8
@@ -117,12 +117,14 @@ def render_gauge(est_psf, min_psf, max_psf, font_size=12):
         title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': font_size + 2, 'color': "gray"}},
         gauge = {
             'axis': {'range': [min_psf*0.9, max_psf*1.1], 'tickwidth': 1, 'tickcolor': "darkblue"},
-            'bar': {'color': "#2563eb"},
+            # 修改 1: 将进度条的厚度设为0，从而隐藏它
+            'bar': {'thickness': 0}, 
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
             'steps': [
-                {'range': [min_psf, max_psf], 'color': "#e0f2fe"},
+                # 修改 2: 将合理区间的颜色从淡蓝(#e0f2fe)改为蓝色(#2563eb)
+                {'range': [min_psf, max_psf], 'color': "#2563eb"},
                 {'range': [min_psf*0.9, min_psf], 'color': "#fef2f2"},
                 {'range': [max_psf, max_psf*1.1], 'color': "#fef2f2"}
             ],
@@ -187,8 +189,9 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         
         low_bound = est_price * 0.95
         high_bound = est_price * 1.05
+        # 同步修改：将文字框的背景色也改为对应的蓝色
         st.markdown(f"""
-        <div style="margin-top:10px; padding:10px; background:#eff6ff; border-radius:4px; font-size:13px; color:#1e40af;">
+        <div style="margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;">
             <strong>合理区间:</strong><br>
             ${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M
         </div>
@@ -202,62 +205,60 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     st.divider()
 
-    # 6. 本单位历史 (按时间倒序)
+    # 6. 本单位历史 (Unit History)
     st.markdown("#### 📜 本单位历史 (Unit History)")
     this_unit_hist = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (pd.to_numeric(df['Floor'], errors='coerce') == floor)].copy()
     
+    final_cols = ['Sale Date', 'Unit', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']
+    col_config = {
+        "Sale Date": "日期",
+        "Unit": "单位",
+        "Type": "户型",
+        "Area (sqft)": "面积",
+        "Sale Price": "总价",
+        "Unit Price ($ psf)": "尺价"
+    }
+
     if not this_unit_hist.empty:
         this_unit_hist = this_unit_hist.sort_values('Sale Date', ascending=False)
-        
-        display_hist = this_unit_hist[['Sale Date', 'Sale Price', 'Unit Price ($ psf)', 'Type']].copy()
+        display_hist = this_unit_hist.copy()
+        display_hist['Unit'] = display_hist.apply(
+            lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
+            axis=1
+        )
         display_hist['Sale Date'] = display_hist['Sale Date'].dt.strftime('%Y-%m-%d')
-        display_hist['Sale Price'] = display_hist['Sale Price'].apply(lambda x: f"${x:,.0f}")
+        display_hist['Sale Price'] = display_hist['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
         display_hist['Unit Price ($ psf)'] = display_hist['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
         
         st.dataframe(
-            display_hist,
+            display_hist[final_cols],
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "Sale Date": "交易日期",
-                "Sale Price": "成交价",
-                "Unit Price ($ psf)": "尺价 (psf)",
-                "Type": "户型"
-            }
+            column_config=col_config
         )
     else:
         st.caption("该单位在记录周期内无历史交易。")
 
     st.divider()
 
-    # 7. 参考交易 (Surrounding Reference)
+    # 7. 参考交易 (Comparable Transactions)
     st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
     
-    comps = comps.sort_values('Weight', ascending=False).head(10)
+    comps = comps.sort_values('Weight', ascending=False).head(6)
     
-    comp_display = comps[['Sale Date', 'BLK', 'Floor', 'Stack', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']].copy()
+    comp_display = comps.copy()
     comp_display['Sale Date'] = comp_display['Sale Date'].dt.strftime('%Y-%m-%d')
     comp_display['Sale Price'] = comp_display['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
     comp_display['Unit Price ($ psf)'] = comp_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
     
-    # 使用安全的格式化拼接
     comp_display['Unit'] = comp_display.apply(
         lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
         axis=1
     )
     
-    final_cols = ['Sale Date', 'Unit', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']
-    
     st.dataframe(
         comp_display[final_cols],
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "Sale Date": "日期",
-            "Unit": "单位",
-            "Type": "户型",
-            "Area (sqft)": "面积",
-            "Sale Price": "总价",
-            "Unit Price ($ psf)": "尺价"
-        }
+        column_config=col_config
     )
