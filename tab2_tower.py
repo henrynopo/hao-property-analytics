@@ -9,7 +9,6 @@ from dateutil.relativedelta import relativedelta
 # --- 0. 核心回调函数 ---
 
 def go_to_valuation(blk, floor, stack):
-    """点击单元格跳转"""
     st.session_state['avm_target'] = {
         'blk': blk,
         'floor': int(floor),
@@ -18,7 +17,6 @@ def go_to_valuation(blk, floor, stack):
     st.session_state['trigger_tab_switch'] = True
 
 def select_block(blk):
-    """点击楼座切换 (强制转为字符串存储，防止类型不匹配)"""
     st.session_state.selected_blk = str(blk)
 
 # --- 1. 数据清洗与辅助 ---
@@ -34,38 +32,33 @@ def clean_data(df_raw):
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
     
-    # [V181] 强制 BLK 列为字符串，防止混合类型导致选中状态失效
+    # [V182] 强力清洗：填充所有空值为特定占位符，防止 NaN 传播
     df['BLK'] = df['BLK'].astype(str)
+    if 'Type' not in df.columns: df['Type'] = "-"
+    df['Type'] = df['Type'].fillna("-").astype(str)
+    
     return df
 
 def calculate_ssd_info(purchase_date):
-    """计算 SSD 状态和剩余月数"""
     if pd.isna(purchase_date): return "", "", 0
-    
     if not isinstance(purchase_date, datetime): purchase_date = pd.to_datetime(purchase_date)
     today = datetime.now()
     POLICY_2025 = pd.Timestamp("2025-07-04")
     lock_years = 4 if purchase_date >= POLICY_2025 else 3
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
     
-    # 1. 已解禁
-    if today >= ssd_deadline:
-        return "🟩", "无SSD", 0
+    if today >= ssd_deadline: return "🟩", "无SSD", 0
     
-    # 2. 计算剩余月数
     delta = relativedelta(ssd_deadline, today)
     months_left = delta.years * 12 + delta.months
     if delta.days > 0: months_left += 1 
 
-    # 3. 计算税率
     years_held = relativedelta(today, purchase_date).years + 1
     rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
     rate_str = rates.get(years_held, "4%")
     rate_val = int(rate_str.strip('%'))
 
-    # 4. 图标逻辑
     days_left = (ssd_deadline - today).days
-    
     if days_left < 90: icon = "🟨"
     elif days_left < 180: icon = "🟧"
     elif rate_val >= 12: icon = "⛔"
@@ -81,22 +74,22 @@ def natural_key(string_):
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', str(string_))]
 
 def shorten_type(type_str):
+    # [V182] 增强型字符串处理
     if not isinstance(type_str, str): return "-"
-    return type_str.replace("Bedroom", "Bed").replace("Maisonette", "Mais").replace("Apartment", "Apt")
+    s = type_str.strip()
+    if s.lower() in ['nan', 'none', '', 'null']: return "-"
+    return s.replace("Bedroom", "Bed").replace("Maisonette", "Mais").replace("Apartment", "Apt")
 
 # --- 2. 渲染主函数 ---
 def render(df_raw, chart_font_size=12):
     df = clean_data(df_raw)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
-    # [V181] 状态初始化 (更加健壮)
-    # 确保 session_state 里的值一定在当前的 blk 列表里，否则重置
     if 'selected_blk' not in st.session_state:
         st.session_state.selected_blk = str(all_blks[0])
     elif str(st.session_state.selected_blk) not in all_blks:
         st.session_state.selected_blk = str(all_blks[0])
 
-    # 跳转逻辑
     if st.session_state.get('trigger_tab_switch', False):
         js_code = f"""
         <script>
@@ -137,7 +130,6 @@ def render(df_raw, chart_font_size=12):
             transform: translateY(-1px);
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
-        /* 选中状态的按钮样式增强 */
         div.stButton > button:focus:not(:active) {
             border-color: #ff4b4b !important;
             color: #ff4b4b !important;
@@ -146,7 +138,7 @@ def render(df_raw, chart_font_size=12):
         </style>
     """, unsafe_allow_html=True)
 
-    # --- Block Selector (V181 修复版) ---
+    # Block Selector
     st.write("选择楼座 (Block):")
     cols_per_row = 8
     rows = [all_blks[i:i + cols_per_row] for i in range(0, len(all_blks), cols_per_row)]
@@ -155,10 +147,7 @@ def render(df_raw, chart_font_size=12):
         cols = st.columns(len(row_blks))
         for idx, blk in enumerate(row_blks):
             with cols[idx]:
-                # 强制转换为字符串比较
                 is_selected = str(st.session_state.selected_blk) == str(blk)
-                
-                # 视觉双重锁定：1. 颜色 2. 图标
                 b_type = "primary" if is_selected else "secondary"
                 label_text = f"🔴 {blk}" if is_selected else blk
                 
@@ -171,7 +160,7 @@ def render(df_raw, chart_font_size=12):
                     args=(blk,)
                 )
 
-    # --- Grid Render ---
+    # Grid Render
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     
@@ -187,7 +176,10 @@ def render(df_raw, chart_font_size=12):
     for s in all_stacks:
         s_data = blk_df[blk_df['Stack'] == s]
         if not s_data.empty:
-            mode_type = s_data['Type'].mode()[0] if not s_data['Type'].empty else "-"
+            # 过滤掉无效值后再求众数
+            valid_types = s_data[~s_data['Type'].isin(['-', 'nan', 'NaN', ''])]['Type']
+            mode_type = valid_types.mode()[0] if not valid_types.empty else "-"
+            
             mode_area = s_data['Area (sqft)'].mode()[0] if not s_data['Area (sqft)'].empty else 0
             stack_info_map[s] = {'type': mode_type, 'area': mode_area}
         else:
@@ -210,19 +202,27 @@ def render(df_raw, chart_font_size=12):
                     tx_data = tx_map.get((f, s))
                     
                     if tx_data:
-                        u_type = shorten_type(str(tx_data.get('Type', '-')))
+                        raw_type = str(tx_data.get('Type', '-'))
+                        u_type = shorten_type(raw_type)
                         u_area = int(tx_data.get('Area (sqft)', 0))
                         ssd_icon, _, _ = calculate_ssd_info(tx_data['Sale Date'])
                     else:
                         stack_defaults = stack_info_map.get(s, {})
-                        u_type = shorten_type(str(stack_defaults.get('type', '-')))
+                        raw_type = str(stack_defaults.get('type', '-'))
+                        u_type = shorten_type(raw_type)
                         u_area = int(stack_defaults.get('area', 0))
                         ssd_icon = "" 
 
                     area_str = f"{u_area:,}sf" if u_area > 0 else "-"
+                    
+                    # 组合显示: Type | Area [| Icon]
+                    # 确保 Type 不为空，避免视觉错位
+                    if u_type == "" or u_type == "-": u_type = "-"
+                    
                     line2_parts = [u_type, area_str]
                     if ssd_icon: line2_parts.append(ssd_icon)
                     line2_str = " | ".join(line2_parts)
+                    
                     label = f"{unit_no}\n{line2_str}"
                     
                     st.button(
@@ -239,20 +239,17 @@ def render(df_raw, chart_font_size=12):
     st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")
     
     with st.expander("🚀 全局机会扫描 (即将解禁)", expanded=False):
-        # 筛选最新交易
         latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor', 'Stack']).tail(1).copy()
         opportunity_list, watchlist = [], []
         
         for _, row in latest_txs.iterrows():
             icon, rate_str, months_left = calculate_ssd_info(row['Sale Date'])
             
-            # 格式化数据
             unit_val = format_unit(row['Floor'], row['Stack'])
             blk_val = row['BLK']
             type_val = shorten_type(str(row['Type']))
             area_val = f"{int(row['Area (sqft)']):,}sf"
             
-            # 构造目标字符串: BLK ｜ 单元号 ｜ 户型 ｜ 尺寸 ｜ SSD剩余月数
             label_str = f"{icon} {blk_val} | {unit_val} | {type_val} | {area_val} | {months_left}mths"
             
             if "🟨" in icon:
