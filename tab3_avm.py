@@ -25,7 +25,9 @@ def clean_and_prepare_data(df_raw):
     df.rename(columns=rename_map, inplace=True)
     
     for col in ['Type', 'Tenure', 'Tenure From', 'Sub Type']:
-        if col not in df.columns: df[col] = "-"
+        if col not in df.columns: df[col] = "N/A"
+    
+    df['Type'] = df['Type'].astype(str)
 
     if 'Sale Date' in df.columns: df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
 
@@ -35,8 +37,6 @@ def clean_and_prepare_data(df_raw):
         else:
             df['Unit Price ($ psf)'] = 0
     
-    # 新增：全局统一楼层为整数，方便精准匹配
-    # 处理 '05', '5', '05.0' 等情况
     df['Floor_Int'] = pd.to_numeric(df['Floor'], errors='coerce').fillna(0).astype(int)
             
     return df
@@ -51,69 +51,158 @@ def format_unit(floor, stack):
     except:
         return f"#{floor}-{stack}"
 
+# --- 辅助：计算全场市场趋势 (All Units) ---
+def calculate_market_trend(full_df):
+    """
+    使用整个项目的所有数据计算年化增长率。
+    """
+    # 限制在最近 36 个月的数据
+    limit_date = datetime.now() - pd.DateOffset(months=36)
+    trend_data = full_df[full_df['Sale Date'] >= limit_date].copy()
+    
+    if len(trend_data) < 10: 
+        return 0.0
+    
+    trend_data['Date_Ord'] = trend_data['Sale Date'].map(datetime.toordinal)
+    
+    x = trend_data['Date_Ord']
+    y = trend_data['Unit Price ($ psf)']
+    
+    try:
+        slope, intercept = np.polyfit(x, y, 1)
+        avg_price = y.mean()
+        if avg_price == 0: return 0.0
+        
+        annual_growth_rate = (slope / avg_price) * 365
+        # 安全钳位: -5% 到 +10%
+        final_rate = max(-0.05, min(0.10, annual_growth_rate))
+        return final_rate
+    except:
+        return 0.0
+
+# --- 辅助：计算楼层修正系数 ---
+def calculate_dynamic_floor_rate(comps):
+    default_rate = 0.005 
+    valid_data = comps[['Floor_Int', 'Unit Price ($ psf)']].dropna()
+    
+    if len(valid_data) < 3 or valid_data['Floor_Int'].nunique() < 2:
+        return default_rate
+    
+    x = valid_data['Floor_Int']
+    y = valid_data['Unit Price ($ psf)']
+    
+    try:
+        slope, intercept = np.polyfit(x, y, 1)
+        avg_psf = y.mean()
+        if avg_psf == 0: return default_rate
+        calc_rate = slope / avg_psf
+        final_rate = max(-0.002, min(0.015, calc_rate))
+        return final_rate
+    except:
+        return default_rate
+
 # --- 核心估值逻辑 ---
 def calculate_avm(df, target_blk, target_floor, target_stack):
-    maisonette_blks = ['10J', '10K', '10L', '10M']
-    is_maisonette = target_blk in maisonette_blks
-    
-    # 1. 筛选 Comparables
-    if is_maisonette:
-        comps = df[df['BLK'].isin(maisonette_blks)].copy()
-    else:
-        comps = df[~df['BLK'].isin(maisonette_blks)].copy()
-    
-    # 2. 获取本单位基础信息 (精准匹配)
-    # V167 修正：必须同时匹配 BLK, Stack, 和 Floor_Int
+    # 1. 计算全场市场增长趋势
+    market_annual_growth = calculate_market_trend(df)
+
+    # 2. 确定目标单位面积 (精准锁定)
     this_unit_exact_tx = df[
         (df['BLK'] == target_blk) & 
         (df['Stack'] == target_stack) & 
         (df['Floor_Int'] == int(target_floor))
     ]
     
-    # --- 面积精准修正逻辑 ---
+    target_type = "N/A"
+
     if not this_unit_exact_tx.empty:
-        # 情况A: 本单位(具体到楼层)有历史交易 -> 100% 准确
         est_area = this_unit_exact_tx.iloc[0]['Area (sqft)']
-        
-        # 属性信息优先取本单位最新的
         latest_rec = this_unit_exact_tx.sort_values('Sale Date', ascending=False).iloc[0]
+        target_type = latest_rec['Type']
         info_tenure = str(latest_rec.get('Tenure', '-'))
         info_from = str(latest_rec.get('Tenure From', '-'))
         info_subtype = str(latest_rec.get('Sub Type', '-'))
     else:
-        # 情况B: 本单位无交易 -> 尝试找同 Stack 的其他楼层
         same_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
-        
         if not same_stack_tx.empty:
-            # 取众数 (Mode) 排除个别异类
             est_area = same_stack_tx['Area (sqft)'].mode()[0]
+            target_type = same_stack_tx['Type'].mode()[0]
         else:
-            # 情况C: 整列都没交易 -> 用同类中位数保底
-            est_area = recent_comps['Area (sqft)'].median() if 'recent_comps' in locals() else comps['Area (sqft)'].median()
+            est_area = df['Area (sqft)'].median()
+            target_type = df['Type'].mode()[0]
         
-        # 属性信息用众数填充
-        info_tenure = comps['Tenure'].mode()[0] if not comps['Tenure'].empty else '-'
-        info_from = comps['Tenure From'].mode()[0] if not comps['Tenure From'].empty else '-'
-        info_subtype = comps['Sub Type'].mode()[0] if not comps['Sub Type'].empty else '-'
+        info_tenure = df['Tenure'].mode()[0] if not df['Tenure'].empty else '-'
+        info_from = df['Tenure From'].mode()[0] if not df['Tenure From'].empty else '-'
+        info_subtype = df['Sub Type'].mode()[0] if not df['Sub Type'].empty else '-'
 
-    # 3. 筛选近期交易
-    limit_date = datetime.now() - pd.DateOffset(months=18)
+    # 3. [V172] 阶梯式面积筛选 (Stepped Area Filtering)
+    # 优先找 +/- 5%，不够找 10%，再不够找 15%
+    # 目标是至少找到 5 笔历史交易记录 (Pool Size)
+    required_comps = 5
+    thresholds = [0.05, 0.10, 0.15]
+    
+    comps = pd.DataFrame()
+    used_threshold = 0.0
+
+    for t in thresholds:
+        min_area = est_area * (1 - t)
+        max_area = est_area * (1 + t)
+        
+        current_comps = df[
+            (df['Area (sqft)'] >= min_area) & 
+            (df['Area (sqft)'] <= max_area)
+        ].copy()
+        
+        if len(current_comps) >= required_comps:
+            comps = current_comps
+            used_threshold = t
+            break
+            
+    # 如果循环结束还没凑够，就用最后一轮的结果
+    if comps.empty and 'current_comps' in locals():
+        comps = current_comps
+        used_threshold = 0.15 # 标记为最大
+        
+    # 如果连 15% 都是空的 (极罕见)，保底扩到 20%
+    if comps.empty:
+        comps = df[
+            (df['Area (sqft)'] >= est_area * 0.8) & 
+            (df['Area (sqft)'] <= est_area * 1.2)
+        ].copy()
+        used_threshold = 0.20
+
+    # 4. 时间筛选 (Time Window)
+    # 优先看近 36 个月
+    limit_date = datetime.now() - pd.DateOffset(months=36)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
+    # 实在不行看近 60 个月
     if recent_comps.empty:
-        limit_date = datetime.now() - pd.DateOffset(months=36)
+        limit_date = datetime.now() - pd.DateOffset(months=60)
         recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
-    
-    if recent_comps.empty:
-        return None, None, {}, pd.DataFrame(), 0
 
-    # 4. 计算调整后尺价
-    # 使用新生成的 Floor_Int 进行计算
-    recent_comps['Adj_PSF'] = recent_comps.apply(
-        lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Int']) * 0.005), 
-        axis=1
-    )
+    if recent_comps.empty:
+        return None, None, {}, pd.DataFrame(), 0, 0, 0, 0
+
+    # 5. 动态计算楼层修正系数
+    floor_adj_rate = calculate_dynamic_floor_rate(recent_comps)
+
+    # 6. 双重修正: 时间增长 + 楼层差异
+    recent_comps['Floor_Int'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     
+    def apply_adjustment(row):
+        # A. 楼层修正
+        floor_multiplier = 1 + (target_floor - row['Floor_Int']) * floor_adj_rate
+        
+        # B. 时间增长修正 (基于全场趋势)
+        years_ago = (datetime.now() - row['Sale Date']).days / 365.0
+        time_multiplier = 1 + (market_annual_growth * years_ago)
+        
+        return row['Unit Price ($ psf)'] * floor_multiplier * time_multiplier
+
+    recent_comps['Adj_PSF'] = recent_comps.apply(apply_adjustment, axis=1)
+    
+    # 权重仅用于置信度
     recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
     recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
     
@@ -124,12 +213,14 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     extra_info = {
         'tenure': info_tenure,
         'from': info_from,
-        'subtype': info_subtype
+        'subtype': info_subtype,
+        'type': target_type
     }
     
-    return est_price, est_psf, extra_info, recent_comps, est_area
+    # 多返回一个 used_threshold 用于显示
+    return est_price, est_psf, extra_info, recent_comps, est_area, floor_adj_rate, market_annual_growth, used_threshold
 
-# --- 渲染仪表盘 (V166: 标题外置 + 微缩) ---
+# --- 渲染仪表盘 ---
 def render_gauge(est_psf, font_size=12):
     range_min = est_psf * 0.90
     range_max = est_psf * 1.10
@@ -186,7 +277,8 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     blk, floor, stack = target['blk'], target['floor'], target['stack']
     df = clean_and_prepare_data(df_raw)
     
-    est_price, est_psf, extra_info, comps, area = calculate_avm(df, blk, floor, stack)
+    # V172: 接收 used_threshold
+    est_price, est_psf, extra_info, comps, area, floor_adj, market_growth, used_threshold = calculate_avm(df, blk, floor, stack)
     
     if est_price is None:
         st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
@@ -194,9 +286,11 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     # 概览卡片
     info_parts = [f"{int(area):,} sqft"]
-    if extra_info['tenure'] != '-': info_parts.append(str(extra_info['tenure']))
-    if extra_info['from'] != '-': info_parts.append(f"From {str(extra_info['from'])}")
-    if extra_info['subtype'] != '-': info_parts.append(str(extra_info['subtype']))
+    if extra_info['type'] != 'N/A': info_parts.append(str(extra_info['type'])) 
+    
+    if extra_info['tenure'] != '-' and extra_info['tenure'] != 'N/A': info_parts.append(str(extra_info['tenure']))
+    if extra_info['from'] != '-' and extra_info['from'] != 'N/A': info_parts.append(f"From {str(extra_info['from'])}")
+    
     info_str = " | ".join(info_parts)
 
     st.markdown(f"""
@@ -218,7 +312,13 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     
     with c1:
         st.metric(label="预估总价 (Est. Price)", value=f"${est_price/1e6:,.2f}M")
-        st.caption(f"基于 {len(comps)} 笔近期参考交易")
+        
+        floor_txt = f"{floor_adj*100:+.2f}%/层"
+        trend_txt = f"{market_growth*100:+.1f}%/年"
+        
+        # 文案更新：显示相似度
+        st.caption(f"基于 {len(comps)} 笔同面积交易 (相似度 ±{int(used_threshold*100)}%)")
+        st.caption(f"修正因子: 楼层 {floor_txt} | 市场趋势 {trend_txt}")
         
         st.markdown(f"""
         <div style="margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;">
@@ -236,7 +336,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     st.divider()
 
     # 本单位历史
-    # V167 修正：使用 Floor_Int 进行精准过滤
     this_unit_hist = df[
         (df['BLK'] == blk) & 
         (df['Stack'] == stack) & 
