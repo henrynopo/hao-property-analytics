@@ -25,8 +25,8 @@ def get_ssd_display(purchase_date):
     lock_years = 4 if purchase_date >= POLICY_2025 else 3
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
     
-    # 修改点：将 Safe 改为 Free，代表“自由/无税”
-    if today >= ssd_deadline: return "🟩", "Free"
+    # 修改：绿色显示为 "无SSD"
+    if today >= ssd_deadline: return "🟩", "无SSD"
 
     days_left = (ssd_deadline - today).days
     diff = relativedelta(today, purchase_date)
@@ -136,9 +136,10 @@ def render(df, chart_font_size=12):
                     )
         if len(stack_chunks) > 1: st.divider()
 
-    # 全局猎盘清单 (图例已更新)
+    # 全局猎盘清单 & 图例
     st.markdown("---")
-    st.info("💡 狩猎指南：🟨 0-3月 (黄金窗口/可谈) | 🟧 3-6月 (保持关注) | 🟥 锁定中 | 🟩 Free (无税/自由)")
+    # 修改：完全遵照指示的简洁文案
+    st.info("🟨 0-3月 | 🟧 3-6月 | 🟥 6月以上 | 🟩 无SSD")
     
     with st.expander("🚀 全局机会扫描 (即将解禁单位)", expanded=False):
         latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor', 'Stack']).tail(1).copy()
@@ -155,14 +156,14 @@ def render(df, chart_font_size=12):
 
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("##### ✨ 黄金机会 (0-3月)")
-            if not opportunity_list: st.caption("暂无即将解禁单位")
+            st.markdown("##### 🟨 0-3月")
+            if not opportunity_list: st.caption("暂无")
             for item in opportunity_list:
                 st.button(item['label'], key=f"opt_{item['blk']}_{item['f']}_{item['s']}", 
                           on_click=go_to_valuation, args=(item['blk'], item['f'], item['s']))
         with c2:
-            st.markdown("##### ⏳ 重点观察 (3-6月)")
-            if not watchlist: st.caption("暂无观察单位")
+            st.markdown("##### 🟧 3-6月")
+            if not watchlist: st.caption("暂无")
             for item in watchlist:
                 st.button(item['label'], key=f"watch_{item['blk']}_{item['f']}_{item['s']}", 
                           on_click=go_to_valuation, args=(item['blk'], item['f'], item['s']))
