@@ -52,31 +52,43 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
     
+    # 1. 筛选 Comparables
     if is_maisonette:
         comps = df[df['BLK'].isin(maisonette_blks)].copy()
     else:
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
     
+    # 2. 获取本单位/Stack 的基础信息
     this_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
     
+    # --- 面积精准修正逻辑 ---
     if not this_stack_tx.empty:
+        # 优先：本单位历史交易面积
         est_area = this_stack_tx.iloc[0]['Area (sqft)']
+        
+        # 属性信息
         latest_rec = this_stack_tx.sort_values('Sale Date', ascending=False).iloc[0]
         info_tenure = str(latest_rec.get('Tenure', '-'))
         info_from = str(latest_rec.get('Tenure From', '-'))
         info_subtype = str(latest_rec.get('Sub Type', '-'))
     else:
-        # 同 Stack 查找
+        # 次选：同 Stack 的众数面积 (Mode)
+        # 相比 iloc[0]，取众数能排除偶尔出现的特殊户型(如Penthouse)的影响
         same_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
+        
         if not same_stack_tx.empty:
-             est_area = same_stack_tx.iloc[0]['Area (sqft)']
+            # 取出现次数最多的面积
+            est_area = same_stack_tx['Area (sqft)'].mode()[0]
         else:
+            # 保底：同类户型中位数
             est_area = recent_comps['Area (sqft)'].median() if 'recent_comps' in locals() else comps['Area (sqft)'].median()
         
+        # 属性信息用众数填充
         info_tenure = comps['Tenure'].mode()[0] if not comps['Tenure'].empty else '-'
         info_from = comps['Tenure From'].mode()[0] if not comps['Tenure From'].empty else '-'
         info_subtype = comps['Sub Type'].mode()[0] if not comps['Sub Type'].empty else '-'
 
+    # 3. 筛选近期交易
     limit_date = datetime.now() - pd.DateOffset(months=18)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
@@ -87,6 +99,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     if recent_comps.empty:
         return None, None, {}, pd.DataFrame(), 0
 
+    # 4. 计算调整后尺价
     recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     recent_comps['Adj_PSF'] = recent_comps.apply(
         lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
@@ -108,14 +121,15 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     return est_price, est_psf, extra_info, recent_comps, est_area
 
-# --- 渲染仪表盘 (V164: 绝对居中修正) ---
+# --- 渲染仪表盘 (V165: 绝对数值对称) ---
 def render_gauge(est_psf, font_size=12):
-    # 1. 蓝色区间 (Steps): +/- 10%
+    # 1. 蓝色区间 (Steps): 严格 +/- 10%
+    # 不做任何取整，保持浮点精度
     range_min = est_psf * 0.90
     range_max = est_psf * 1.10
     
-    # 2. 仪表盘全长 (Axis): +/- 20%
-    # 这种设定下，指针 (est_psf) 必定在正中间
+    # 2. 仪表盘总刻度 (Axis): 严格 +/- 20%
+    # 这样 est_psf 必然是 (0.8 + 1.2) / 2 = 1.0 的中心点
     axis_min = est_psf * 0.80
     axis_max = est_psf * 1.20
         
@@ -130,19 +144,21 @@ def render_gauge(est_psf, font_size=12):
                 'range': [axis_min, axis_max], 
                 'tickwidth': 1, 
                 'tickcolor': "darkblue",
-                # 强制只显示 Min, Max 和 Est. PSF 三个刻度，避免视觉干扰
-                'tickvals': [int(axis_min), int(est_psf), int(axis_max)]
+                # 为了视觉绝对干净，我们强制只显示3个刻度：最小值、预估值(中点)、最大值
+                'tickmode': 'array',
+                'tickvals': [axis_min, est_psf, axis_max],
+                'ticktext': [f"{int(axis_min)}", f"{int(est_psf)}", f"{int(axis_max)}"]
             },
-            'bar': {'thickness': 0}, 
+            'bar': {'thickness': 0}, # 隐藏原来的进度条
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "#e5e7eb",
             'steps': [
-                # 左侧灰色区域 (-20% ~ -10%)
+                # 灰色背景 (-20% ~ -10%)
                 {'range': [axis_min, range_min], 'color': "#f3f4f6"},
-                # 中间蓝色区域 (-10% ~ +10%)
+                # 蓝色区间 (-10% ~ +10%) -> 视觉占比 50%，绝对居中
                 {'range': [range_min, range_max], 'color': "#2563eb"},
-                # 右侧灰色区域 (+10% ~ +20%)
+                # 灰色背景 (+10% ~ +20%)
                 {'range': [range_max, axis_max], 'color': "#f3f4f6"}
             ],
             'threshold': {
@@ -199,7 +215,7 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     c1, c2 = st.columns([1, 1.5])
     
-    # 3. 文字也严格对齐 +/- 10%
+    # 文字部分：严格 +/- 10%
     low_bound = est_price * 0.90
     high_bound = est_price * 1.10
     
