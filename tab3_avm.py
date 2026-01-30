@@ -6,10 +6,31 @@ from datetime import datetime
 
 # --- 核心估值逻辑 ---
 def calculate_avm(df, target_blk, target_floor, target_stack):
-    # 1. 基础过滤
-    df['Sale Date'] = pd.to_datetime(df['Sale Date'])
+    # 0. 数据清洗与容错 (新增)
+    # 确保列名统一，防止 KeyError
+    df = df.copy() # 避免修改原始缓存
     
-    # 2. 寻找同类户型 (Maisonette vs Typical)
+    # 映射常见列名差异
+    col_map = {
+        'Transacted Price ($)': 'Sale Price',
+        'Area (SQFT)': 'Area (sqft)',
+        'Unit Price ($ psm)': 'Unit Price ($ psf)' # 暂时占位，下面会重算
+    }
+    df.rename(columns=col_map, inplace=True)
+    
+    # 确保 Sale Date 是时间格式
+    if 'Sale Date' in df.columns:
+        df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
+    
+    # 关键修复：如果缺少尺价列，手动计算
+    if 'Unit Price ($ psf)' not in df.columns:
+        if 'Sale Price' in df.columns and 'Area (sqft)' in df.columns:
+            df['Unit Price ($ psf)'] = df['Sale Price'] / df['Area (sqft)']
+        else:
+            # 如果连总价或面积都没有，直接返回空
+            return None, None, "Data Error", pd.DataFrame(), 0
+
+    # 1. 寻找同类户型 (Maisonette vs Typical)
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
     
@@ -20,7 +41,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
         type_tag = "Apartment (平层)"
     
-    # 3. 时间权重 (近18个月 -> 近36个月)
+    # 2. 时间权重 (近18个月 -> 近36个月)
     limit_date = datetime.now() - pd.DateOffset(months=18)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
@@ -31,16 +52,17 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     if recent_comps.empty:
         return None, None, type_tag, pd.DataFrame(), 0
 
-    # 4. 楼层调整
+    # 3. 楼层调整
     recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     
-    # 计算调整后的 PSF
+    # 计算调整后的 PSF (Formula: Target PSF = Comp PSF * (1 + diff * 0.5%))
+    # 注意：这里使用了容错后的 'Unit Price ($ psf)' 列
     recent_comps['Adj_PSF'] = recent_comps.apply(
         lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
         axis=1
     )
     
-    # 5. 加权平均
+    # 4. 加权平均
     recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
     recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
     
@@ -86,7 +108,6 @@ def render_gauge(est_psf, min_psf, max_psf, font_size=12):
             }
         }
     ))
-    # 增加 Margin 防止遮挡
     fig.update_layout(
         height=250, 
         margin=dict(l=30, r=30, t=50, b=50),
@@ -95,7 +116,7 @@ def render_gauge(est_psf, min_psf, max_psf, font_size=12):
     )
     return fig
 
-# --- 主渲染函数 (参数签名已修复) ---
+# --- 主渲染函数 ---
 def render(df, project_name="Project", chart_font_size=12):
     st.subheader("🤖 智能估值 (AVM)")
 
@@ -109,10 +130,11 @@ def render(df, project_name="Project", chart_font_size=12):
     blk, floor, stack = target['blk'], target['floor'], target['stack']
     
     # 2. 计算估值
+    # 这里会自动处理缺列问题
     est_price, est_psf, type_tag, comps, area = calculate_avm(df, blk, floor, stack)
     
     if est_price is None:
-        st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
+        st.error(f"数据不足或格式错误，无法评估 {blk} #{floor}-{stack}")
         return
 
     # 3. 顶部概览卡片
@@ -136,7 +158,6 @@ def render(df, project_name="Project", chart_font_size=12):
         )
         st.caption(f"基于 {len(comps)} 笔近期参考交易")
         
-        # 价格区间置信度
         low_bound = est_price * 0.95
         high_bound = est_price * 1.05
         st.markdown(f"""
@@ -147,7 +168,7 @@ def render(df, project_name="Project", chart_font_size=12):
         """, unsafe_allow_html=True)
 
     with c2:
-        # 仪表盘 (传入字体大小)
+        # 仪表盘
         min_p = comps['Unit Price ($ psf)'].min()
         max_p = comps['Unit Price ($ psf)'].max()
         st.plotly_chart(render_gauge(est_psf, min_p, max_p, chart_font_size), use_container_width=True)
@@ -156,10 +177,16 @@ def render(df, project_name="Project", chart_font_size=12):
 
     # 5. 本单位历史 (按时间倒序)
     st.markdown("#### 📜 本单位历史 (Unit History)")
-    this_unit_hist = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (pd.to_numeric(df['Floor'], errors='coerce') == floor)].copy()
+    # 使用容错后的 df
+    # 重新计算一次列名确保一致（因为 calculate_avm 里的 df 是 copy 的）
+    df_safe = df.copy()
+    if 'Unit Price ($ psf)' not in df_safe.columns:
+        if 'Sale Price' in df_safe.columns and 'Area (sqft)' in df_safe.columns:
+            df_safe['Unit Price ($ psf)'] = df_safe['Sale Price'] / df_safe['Area (sqft)']
+            
+    this_unit_hist = df_safe[(df_safe['BLK'] == blk) & (df_safe['Stack'] == stack) & (pd.to_numeric(df_safe['Floor'], errors='coerce') == floor)].copy()
     
     if not this_unit_hist.empty:
-        # 强制按 Sale Date 倒序
         this_unit_hist['Sale Date'] = pd.to_datetime(this_unit_hist['Sale Date'])
         this_unit_hist = this_unit_hist.sort_values('Sale Date', ascending=False)
         
@@ -187,7 +214,6 @@ def render(df, project_name="Project", chart_font_size=12):
     # 6. 参考交易 (Surrounding Reference)
     st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
     
-    # 按权重排序
     comps = comps.sort_values('Weight', ascending=False).head(10)
     
     comp_display = comps[['Sale Date', 'BLK', 'Floor', 'Stack', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']].copy()
