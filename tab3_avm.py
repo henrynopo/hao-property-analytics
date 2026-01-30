@@ -92,15 +92,17 @@ def format_unit_masked(floor):
         return f"#{floor}-XX"
 
 def get_address_template(project_name, blk, unit_str):
-    address_map = utils_address.load_addresses()
-    proj_config = address_map.get(project_name, {})
+    """根据 Project + Block 查找地址"""
+    # 使用 utils_address 的新查找逻辑
+    street, postal = utils_address.find_address_info(project_name, blk)
     
-    street = proj_config.get("street", project_name) 
-    postal_base = proj_config.get("postal_base", "")
+    # 兜底逻辑
+    if not street: street = project_name # 没配置路名就用项目名
     
-    if postal_base:
-        postal_str = f"Singapore {postal_base}XX" 
+    if postal:
+        postal_str = f"Singapore {postal}"
     else:
+        # 如果完全没配置，给一个默认格式
         postal_str = "Singapore XXXXXX"
         
     return f"Block {blk} {street}\n{unit_str}\n{postal_str}"
