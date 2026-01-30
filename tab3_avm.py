@@ -7,12 +7,9 @@ import re
 
 # --- 辅助：统一数据清洗 ---
 def clean_and_prepare_data(df_raw):
-    """
-    统一处理列名映射和缺失值，确保后续逻辑使用的字段都存在。
-    """
     df = df_raw.copy()
     
-    # 1. 列名映射字典
+    # 1. 列名映射
     rename_map = {
         'Transacted Price ($)': 'Sale Price',
         'Area (SQFT)': 'Area (sqft)',
@@ -25,7 +22,7 @@ def clean_and_prepare_data(df_raw):
     }
     df.rename(columns=rename_map, inplace=True)
     
-    # 2. 确保核心列存在
+    # 2. 确保列存在
     if 'Type' not in df.columns:
         df['Type'] = "N/A"
         
@@ -103,7 +100,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     return est_price, est_psf, type_tag, recent_comps, est_area
 
-# --- 渲染仪表盘 (视觉优化) ---
+# --- 渲染仪表盘 ---
 def render_gauge(est_psf, min_psf, max_psf, font_size=12):
     if min_psf == max_psf:
         min_psf = est_psf * 0.8
@@ -117,14 +114,12 @@ def render_gauge(est_psf, min_psf, max_psf, font_size=12):
         title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': font_size + 2, 'color': "gray"}},
         gauge = {
             'axis': {'range': [min_psf*0.9, max_psf*1.1], 'tickwidth': 1, 'tickcolor': "darkblue"},
-            # 修改 1: 将进度条的厚度设为0，从而隐藏它
-            'bar': {'thickness': 0}, 
+            'bar': {'thickness': 0}, # 隐藏进度条
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
             'steps': [
-                # 修改 2: 将合理区间的颜色从淡蓝(#e0f2fe)改为蓝色(#2563eb)
-                {'range': [min_psf, max_psf], 'color': "#2563eb"},
+                {'range': [min_psf, max_psf], 'color': "#2563eb"}, # 蓝色合理区间
                 {'range': [min_psf*0.9, min_psf], 'color': "#fef2f2"},
                 {'range': [max_psf, max_psf*1.1], 'color': "#fef2f2"}
             ],
@@ -189,7 +184,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         
         low_bound = est_price * 0.95
         high_bound = est_price * 1.05
-        # 同步修改：将文字框的背景色也改为对应的蓝色
         st.markdown(f"""
         <div style="margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;">
             <strong>合理区间:</strong><br>
@@ -222,8 +216,9 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     if not this_unit_hist.empty:
         this_unit_hist = this_unit_hist.sort_values('Sale Date', ascending=False)
         display_hist = this_unit_hist.copy()
+        # 修改：增加 BLK 前缀
         display_hist['Unit'] = display_hist.apply(
-            lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
+            lambda row: f"BLK {row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
             axis=1
         )
         display_hist['Sale Date'] = display_hist['Sale Date'].dt.strftime('%Y-%m-%d')
@@ -251,8 +246,9 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     comp_display['Sale Price'] = comp_display['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
     comp_display['Unit Price ($ psf)'] = comp_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
     
+    # 修改：增加 BLK 前缀
     comp_display['Unit'] = comp_display.apply(
-        lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
+        lambda row: f"BLK {row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
         axis=1
     )
     
