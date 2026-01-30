@@ -36,61 +36,70 @@ def render(df, project_name, chart_font_size):
 
     if 'avm_res' not in st.session_state: st.session_state.avm_res = None
 
-    # --- 1. 自动定位逻辑 (含自动触发) ---
-    t_blk, t_flr, t_stk = None, None, None
-    auto_run = False  # 默认不自动运行
+    # --- 1. 接收跳转信号 & 强制同步状态 ---
+    # 关键修复：Streamlit 的 widget key 优先级很高，必须在这里强制覆盖
+    auto_run = False
+    
+    # 定义 Widget Key (版本号 v108 防止缓存冲突)
+    KEY_BLK = "blk_v108"
+    KEY_FLR = "flr_v108"
+    KEY_STK = "stk_v108"
 
     if 'avm_target' in st.session_state:
-        t = st.session_state['avm_target']
-        t_blk, t_flr, t_stk = t['blk'], t['floor'], t['stack']
+        target = st.session_state['avm_target']
+        t_blk, t_flr, t_stk = target['blk'], target['floor'], target['stack']
         
-        # 成功提示
-        st.toast(f"📍 已定位至 {t_blk} #{t_flr}-{t_stk}，正在估值...", icon="🚀")
+        # 强制更新 Session State，让 Selectbox 听话
+        st.session_state[KEY_BLK] = t_blk
+        st.session_state[KEY_FLR] = t_flr
+        st.session_state[KEY_STK] = t_stk
         
-        # 标记为需要自动运行
+        st.toast(f"📍 已定位至 {t_blk} #{t_flr}-{t_stk}", icon="🚀")
         auto_run = True
         
-        # 清除信号，防止刷新页面时重复触发
+        # 用完即焚，防止循环
         del st.session_state['avm_target']
 
-    # --- 2. 输入表单 (自动填充) ---
+    # --- 2. 渲染表单 ---
     c1, c2, c3 = st.columns(3)
     
+    # 准备 Block 列表
+    blks = sorted(df['BLK'].unique(), key=natural_key)
+    
     with c1:
-        blks = sorted(df['BLK'].unique(), key=natural_key)
-        # 如果有跳转目标，使用目标的 Block，否则维持现状或默认
-        b_idx = blks.index(t_blk) if t_blk in blks else 0
-        s_blk = st.selectbox("1. 楼座 (Block)", blks, index=b_idx, key="blk_v107")
+        # 注意：这里不需要 index 参数，因为 key 已经在 session_state 里被我们强制改过了
+        # 如果 session_state 里没有 (第一次打开)，Streamlit 会默认选第一个
+        s_blk = st.selectbox("1. 楼座 (Block)", blks, key=KEY_BLK)
+    
+    # 准备 Floor 列表 (基于当前选中的 Block)
+    blk_df = df[df['BLK'] == s_blk]
+    if 'Floor_Num' in blk_df.columns:
+        floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
+    else:
+        floors = [1]
+    if not floors: floors = [1]
     
     with c2:
-        blk_df = df[df['BLK'] == s_blk]
-        floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int)) if 'Floor_Num' in blk_df.columns else [1]
-        if not floors: floors = [1]
+        # 防崩逻辑：如果自动填入的楼层不在当前 Block 的楼层列表中 (极少见)，重置
+        if KEY_FLR in st.session_state and st.session_state[KEY_FLR] not in floors:
+             st.session_state[KEY_FLR] = floors[len(floors)//2]
+             
+        s_flr = st.selectbox("2. 楼层 (Floor)", floors, key=KEY_FLR)
         
-        # 智能匹配楼层
-        if t_flr in floors:
-            f_idx = floors.index(t_flr)
-        else:
-            # 如果是手动切换Block，默认选中中间楼层
-            f_idx = len(floors)//2
-            
-        s_flr = st.selectbox("2. 楼层 (Floor)", floors, index=f_idx, key="flr_v107")
-        
+    # 准备 Stack 列表
+    stacks = sorted(blk_df[blk_df['Floor_Num']==s_flr]['Stack'].unique(), key=natural_key)
+    if not stacks: stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
+    if not stacks: stacks = ['Unknown']
+    
     with c3:
-        stacks = sorted(blk_df[blk_df['Floor_Num']==s_flr]['Stack'].unique(), key=natural_key)
-        if not stacks: stacks = sorted(blk_df['Stack'].unique(), key=natural_key) # 兜底
-        if not stacks: stacks = ['Unknown']
-        
-        # 智能匹配单元
-        if t_stk in stacks:
-            s_idx = stacks.index(t_stk)
-        else:
-            s_idx = 0
+        # 防崩逻辑：同上
+        if KEY_STK in st.session_state and st.session_state[KEY_STK] not in stacks:
+            st.session_state[KEY_STK] = stacks[0]
             
-        s_stk = st.selectbox("3. 单元 (Stack)", stacks, index=s_idx, key="stk_v107")
+        s_stk = st.selectbox("3. 单元 (Stack)", stacks, key=KEY_STK)
 
-    # --- 3. 计算逻辑 (按钮点击 OR 自动触发) ---
-    # 逻辑：如果用户点了按钮，或者 auto_run 标志位为 True，都执行计算
+    # --- 3. 触发计算 ---
+    # 无论是手动点击，还是自动跳转 (auto_run)，都执行
     trigger = st.button("🚀 开始估值", type="primary", use_container_width=True)
     
     if trigger or auto_run:
