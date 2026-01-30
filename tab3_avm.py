@@ -5,6 +5,13 @@ import plotly.graph_objects as go
 from datetime import datetime
 import re
 import time
+import io
+
+# --- ReportLab Imports for PDF ---
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # --- 辅助：统一数据清洗 ---
 def clean_and_prepare_data(df_raw):
@@ -47,22 +54,123 @@ def format_unit(floor, stack):
     try:
         f_num = int(float(floor))
         s_str = str(stack)
-        # 补零逻辑：如果是数字字符串则补零，否则保持原样
         s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
         return f"#{f_num:02d}-{s_fmt}"
     except:
         return f"#{floor}-{stack}"
 
-# --- 辅助：计算全场市场趋势 (All Units) ---
+# --- PDF 生成函数 ---
+def generate_pdf(project_name, blk, floor, stack, area, u_type, est_price, est_psf, comps_df):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # 标题
+    title_style = styles['Title']
+    elements.append(Paragraph(f"Valuation Report: {project_name}", title_style))
+    elements.append(Spacer(1, 12))
+    
+    # 单位信息
+    normal_style = styles['Normal']
+    unit_str = format_unit(floor, stack)
+    info_text = f"""
+    <b>Property:</b> BLK {blk} {unit_str}<br/>
+    <b>Area:</b> {int(area):,} sqft<br/>
+    <b>Type:</b> {u_type}<br/>
+    <b>Date:</b> {datetime.now().strftime('%Y-%m-%d')}
+    """
+    elements.append(Paragraph(info_text, normal_style))
+    elements.append(Spacer(1, 20))
+    
+    # 估值结果
+    val_style = ParagraphStyle('ValStyle', parent=styles['Heading2'], textColor=colors.darkblue)
+    elements.append(Paragraph(f"Estimated Value: ${est_price/1e6:,.2f} Million", val_style))
+    elements.append(Paragraph(f"Estimated PSF: ${est_psf:,.0f} psf", normal_style))
+    elements.append(Spacer(1, 20))
+    
+    # 参考交易列表
+    elements.append(Paragraph("<b>Comparable Transactions Used:</b>", styles['Heading3']))
+    elements.append(Spacer(1, 10))
+    
+    # 准备表格数据
+    data = [['Date', 'Unit', 'Area', 'Price', 'PSF']]
+    
+    # 按权重排序取前10个
+    display_comps = comps_df.sort_values('Weight', ascending=False).head(10)
+    
+    for _, row in display_comps.iterrows():
+        unit_fmt = format_unit(row['Floor'], row['Stack'])
+        date_fmt = row['Sale Date'].strftime('%Y-%m-%d')
+        price_fmt = f"${row['Sale Price']/1e6:.2f}M"
+        psf_fmt = f"${row['Unit Price ($ psf)']:,.0f}"
+        
+        data.append([
+            date_fmt,
+            f"BLK {row['BLK']} {unit_fmt}",
+            f"{int(row['Area (sqft)']):,}",
+            price_fmt,
+            psf_fmt
+        ])
+        
+    t = Table(data)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+    ]))
+    elements.append(t)
+    
+    # 免责声明
+    elements.append(Spacer(1, 30))
+    disclaimer = """
+    <font size="8" color="grey">
+    Disclaimer: This is a computer-generated estimate based on historical transaction data. 
+    It does not constitute a formal valuation and should not be relied upon as such.
+    </font>
+    """
+    elements.append(Paragraph(disclaimer, normal_style))
+    
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+# --- 辅助：获取单位物理属性 ---
+def get_unit_specs(df, target_blk, target_floor, target_stack):
+    this_unit = df[
+        (df['BLK'] == target_blk) & 
+        (df['Stack'] == target_stack) & 
+        (df['Floor_Int'] == int(target_floor))
+    ]
+    
+    if not this_unit.empty:
+        rec = this_unit.sort_values('Sale Date', ascending=False).iloc[0]
+        return rec['Area (sqft)'], rec['Type'], 'History'
+    
+    same_stack = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
+    if not same_stack.empty:
+        mode_area = same_stack['Area (sqft)'].mode()
+        area = mode_area[0] if not mode_area.empty else same_stack['Area (sqft)'].mean()
+        
+        mode_type = same_stack['Type'].mode()
+        u_type = mode_type[0] if not mode_type.empty else "N/A"
+        return area, u_type, 'Stack Inference'
+    
+    default_area = df['Area (sqft)'].median() if not df.empty else 1000
+    default_type = df['Type'].mode()[0] if not df.empty else "3 Bedroom"
+    return default_area, default_type, 'Global Default'
+
+# --- 辅助：计算全场市场趋势 ---
 def calculate_market_trend(full_df):
     limit_date = datetime.now() - pd.DateOffset(months=36)
     trend_data = full_df[full_df['Sale Date'] >= limit_date].copy()
-    
-    if len(trend_data) < 10: 
-        return 0.0
+    if len(trend_data) < 10: return 0.0
     
     trend_data['Date_Ord'] = trend_data['Sale Date'].map(datetime.toordinal)
-    
     x = trend_data['Date_Ord']
     y = trend_data['Unit Price ($ psf)']
     
@@ -70,10 +178,8 @@ def calculate_market_trend(full_df):
         slope, intercept = np.polyfit(x, y, 1)
         avg_price = y.mean()
         if avg_price == 0: return 0.0
-        
         annual_growth_rate = (slope / avg_price) * 365
-        final_rate = max(-0.05, min(0.10, annual_growth_rate))
-        return final_rate
+        return max(-0.05, min(0.10, annual_growth_rate))
     except:
         return 0.0
 
@@ -81,57 +187,43 @@ def calculate_market_trend(full_df):
 def calculate_dynamic_floor_rate(comps):
     default_rate = 0.005 
     valid_data = comps[['Floor_Int', 'Unit Price ($ psf)']].dropna()
-    
-    if len(valid_data) < 3 or valid_data['Floor_Int'].nunique() < 2:
-        return default_rate
+    if len(valid_data) < 3 or valid_data['Floor_Int'].nunique() < 2: return default_rate
     
     x = valid_data['Floor_Int']
     y = valid_data['Unit Price ($ psf)']
-    
     try:
         slope, intercept = np.polyfit(x, y, 1)
         avg_psf = y.mean()
         if avg_psf == 0: return default_rate
-        calc_rate = slope / avg_psf
-        final_rate = max(-0.002, min(0.015, calc_rate))
-        return final_rate
+        return max(-0.002, min(0.015, slope / avg_psf))
     except:
         return default_rate
 
 # --- 核心估值逻辑 ---
-def calculate_avm(df, target_blk, target_floor, target_stack):
+def calculate_avm(df, target_blk, target_floor, target_stack, override_area=None, override_type=None):
     market_annual_growth = calculate_market_trend(df)
 
-    this_unit_exact_tx = df[
-        (df['BLK'] == target_blk) & 
-        (df['Stack'] == target_stack) & 
-        (df['Floor_Int'] == int(target_floor))
-    ]
-    
-    target_type = "N/A"
-
-    if not this_unit_exact_tx.empty:
-        est_area = this_unit_exact_tx.iloc[0]['Area (sqft)']
-        latest_rec = this_unit_exact_tx.sort_values('Sale Date', ascending=False).iloc[0]
-        target_type = latest_rec['Type']
-        info_tenure = str(latest_rec.get('Tenure', '-'))
-        info_from = str(latest_rec.get('Tenure From', '-'))
-        info_subtype = str(latest_rec.get('Sub Type', '-'))
+    if override_area is not None and override_type is not None:
+        est_area = override_area
+        target_type = override_type
+        base_info_source = df[df['BLK'] == target_blk]
+        if base_info_source.empty: base_info_source = df
+        info_tenure = base_info_source['Tenure'].mode()[0] if not base_info_source['Tenure'].empty else '-'
+        info_from = base_info_source['Tenure From'].mode()[0] if not base_info_source['Tenure From'].empty else '-'
+        info_subtype = base_info_source['Sub Type'].mode()[0] if not base_info_source['Sub Type'].empty else '-'
     else:
-        same_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
-        if not same_stack_tx.empty:
-            est_area = same_stack_tx['Area (sqft)'].mode()[0]
-            target_type = same_stack_tx['Type'].mode()[0]
+        est_area, target_type, _ = get_unit_specs(df, target_blk, target_floor, target_stack)
+        rec_matches = df[(df['BLK']==target_blk) & (df['Stack']==target_stack)]
+        if not rec_matches.empty:
+            rec = rec_matches.iloc[0]
+            info_tenure = str(rec.get('Tenure', '-'))
+            info_from = str(rec.get('Tenure From', '-'))
+            info_subtype = str(rec.get('Sub Type', '-'))
         else:
-            est_area = df['Area (sqft)'].median()
-            target_type = df['Type'].mode()[0]
-        
-        info_tenure = df['Tenure'].mode()[0] if not df['Tenure'].empty else '-'
-        info_from = df['Tenure From'].mode()[0] if not df['Tenure From'].empty else '-'
-        info_subtype = df['Sub Type'].mode()[0] if not df['Sub Type'].empty else '-'
+            info_tenure, info_from, info_subtype = '-', '-', '-'
 
     required_comps = 5
-    thresholds = [0.05, 0.10, 0.15]
+    thresholds = [0.05, 0.10, 0.15, 0.20]
     
     comps = pd.DataFrame()
     used_threshold = 0.0
@@ -139,12 +231,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     for t in thresholds:
         min_area = est_area * (1 - t)
         max_area = est_area * (1 + t)
-        
-        current_comps = df[
-            (df['Area (sqft)'] >= min_area) & 
-            (df['Area (sqft)'] <= max_area)
-        ].copy()
-        
+        current_comps = df[(df['Area (sqft)'] >= min_area) & (df['Area (sqft)'] <= max_area)].copy()
         if len(current_comps) >= required_comps:
             comps = current_comps
             used_threshold = t
@@ -152,14 +239,11 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
             
     if comps.empty and 'current_comps' in locals():
         comps = current_comps
-        used_threshold = 0.15 
-        
-    if comps.empty:
-        comps = df[
-            (df['Area (sqft)'] >= est_area * 0.8) & 
-            (df['Area (sqft)'] <= est_area * 1.2)
-        ].copy()
         used_threshold = 0.20
+        
+    if len(comps) < 2 and target_type != "N/A":
+        comps = df[df['Type'] == target_type].copy()
+        used_threshold = 9.99 
 
     limit_date = datetime.now() - pd.DateOffset(months=36)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
@@ -172,7 +256,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         return None, None, {}, pd.DataFrame(), 0, 0, 0, 0
 
     floor_adj_rate = calculate_dynamic_floor_rate(recent_comps)
-
     recent_comps['Floor_Int'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     
     def apply_adjustment(row):
@@ -255,24 +338,55 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     blk, floor, stack = target['blk'], target['floor'], target['stack']
     df = clean_and_prepare_data(df_raw)
     
-    est_price, est_psf, extra_info, comps, area, floor_adj, market_growth, used_threshold = calculate_avm(df, blk, floor, stack)
+    # 获取默认值
+    sys_area, sys_type, sys_source = get_unit_specs(df, blk, floor, stack)
+    
+    all_types = sorted(df['Type'].unique().tolist())
+    if sys_type not in all_types: all_types.insert(0, sys_type)
+    
+    # 手动校准 UI
+    widget_key_suffix = f"{blk}_{floor}_{stack}"
+    with st.expander("⚙️ 调整参数 (Calibration)", expanded=True):
+        c_cal1, c_cal2 = st.columns(2)
+        with c_cal1:
+            input_area = st.number_input(
+                "面积 (sqft)", 
+                value=int(sys_area) if pd.notna(sys_area) else 0,
+                step=10,
+                key=f"cal_area_{widget_key_suffix}"
+            )
+        with c_cal2:
+            input_type = st.selectbox(
+                "户型 (Type)", 
+                options=all_types,
+                index=all_types.index(sys_type) if sys_type in all_types else 0,
+                key=f"cal_type_{widget_key_suffix}"
+            )
+        
+        if sys_source == 'Stack Inference':
+            st.caption(f"ℹ️ 系统根据同列单位推测: {int(sys_area)} sqft | {sys_type}")
+        elif sys_source == 'Global Default':
+            st.caption("⚠️ 无历史记录，显示为默认值。请手动校准。")
+    
+    # 计算估值
+    est_price, est_psf, extra_info, comps, area, floor_adj, market_growth, used_threshold = calculate_avm(
+        df, blk, floor, stack, 
+        override_area=input_area, 
+        override_type=input_type
+    )
     
     if est_price is None:
-        st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
+        st.error(f"⚠️ 数据严重不足，即使调整参数也无法找到参考交易。")
+        st.info("建议：尝试将面积调整为项目中的主流户型面积 (如 1,700 sqft) 再次尝试。")
         return
 
-    # 概览卡片
+    # 显示结果
+    formatted_unit_str = format_unit(floor, stack)
     info_parts = [f"{int(area):,} sqft"]
     if extra_info['type'] != 'N/A': info_parts.append(str(extra_info['type'])) 
-    
     if extra_info['tenure'] != '-' and extra_info['tenure'] != 'N/A': info_parts.append(str(extra_info['tenure']))
-    if extra_info['from'] != '-' and extra_info['from'] != 'N/A': info_parts.append(f"From {str(extra_info['from'])}")
-    
     info_str = " | ".join(info_parts)
     
-    # [V178] 使用 format_unit 格式化标题中的单元号
-    formatted_unit_str = format_unit(floor, stack)
-
     st.markdown(f"""
     <div style="background-color:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:20px;">
         <p style="margin:0 0 5px 0; color:#64748b; font-size:12px; font-weight:bold; letter-spacing:1px; text-transform:uppercase;">
@@ -286,7 +400,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     """, unsafe_allow_html=True)
 
     c1, c2 = st.columns([1, 1.5])
-    
     low_bound = est_price * 0.90
     high_bound = est_price * 1.10
     
@@ -295,9 +408,20 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         
         floor_txt = f"{floor_adj*100:+.2f}%/层"
         trend_txt = f"{market_growth*100:+.1f}%/年"
+        sim_txt = f"±{int(used_threshold*100)}%" if used_threshold < 9 else "宽松匹配"
         
-        st.caption(f"基于 {len(comps)} 笔同面积交易 (相似度 ±{int(used_threshold*100)}%)")
-        st.caption(f"修正因子: 楼层 {floor_txt} | 市场趋势 {trend_txt}")
+        st.caption(f"参考: {len(comps)}笔交易 (相似度 {sim_txt})")
+        st.caption(f"修正: 楼层 {floor_txt} | 趋势 {trend_txt}")
+        
+        # [PDF 下载按钮]
+        pdf_file = generate_pdf(project_name, blk, floor, stack, area, extra_info['type'], est_price, est_psf, comps)
+        st.download_button(
+            label="📄 下载估值报告 (PDF)",
+            data=pdf_file,
+            file_name=f"Valuation_{blk}_{formatted_unit_str}.pdf",
+            mime="application/pdf",
+            key=f"btn_pdf_{blk}_{floor}_{stack}"
+        )
         
         st.markdown(f"""
         <div style="margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;">
@@ -310,7 +434,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
             "<h5 style='text-align: center; color: #64748b; font-size: 14px; margin-bottom: 0px;'>预估尺价 (Estimated PSF)</h5>", 
             unsafe_allow_html=True
         )
-        # 强制更新 Key
         st.plotly_chart(
             render_gauge(est_psf, chart_font_size), 
             use_container_width=True,
