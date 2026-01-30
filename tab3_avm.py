@@ -10,7 +10,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     df['Sale Date'] = pd.to_datetime(df['Sale Date'])
     
     # 2. 寻找同类户型 (Maisonette vs Typical)
-    # 简单逻辑：如果是 10J-10M，算 Maisonette；其他算 Typical
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
     
@@ -18,38 +17,30 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         comps = df[df['BLK'].isin(maisonette_blks)].copy()
         type_tag = "Maisonette (复式)"
     else:
-        # 排除掉 Maisonette 的就是 Typical
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
         type_tag = "Apartment (平层)"
     
-    # 3. 时间权重 (越近越重要)
-    # 仅取最近 18 个月的数据，保证时效性
+    # 3. 时间权重 (近18个月 -> 近36个月)
     limit_date = datetime.now() - pd.DateOffset(months=18)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
     if recent_comps.empty:
-        # 如果最近无交易，放宽到 36 个月
         limit_date = datetime.now() - pd.DateOffset(months=36)
         recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
     if recent_comps.empty:
-        return None, None, type_tag, pd.DataFrame()
+        return None, None, type_tag, pd.DataFrame(), 0
 
-    # 4. 楼层调整 (Floor Adjustment)
-    # 假设每高一层，PSF +0.5% (保守估计)
-    # 基准楼层设为最近交易的平均楼层
+    # 4. 楼层调整
     recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
-    avg_floor = recent_comps['Floor_Num'].mean()
     
     # 计算调整后的 PSF
-    # Formula: Adj_PSF = Raw_PSF * (1 + (Target_Floor - Comp_Floor) * 0.005)
     recent_comps['Adj_PSF'] = recent_comps.apply(
         lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
         axis=1
     )
     
-    # 5. 加权平均 (时间衰减)
-    # 权重 = 1 / (天数差 + 30)
+    # 5. 加权平均
     recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
     recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
     
@@ -58,8 +49,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     # 估值结果
     est_psf = weighted_psf
     
-    # 寻找本单位面积 (尝试从历史记录找，找不到就用同类平均)
-    # 精确匹配 Block + Stack
+    # 寻找本单位面积
     this_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
     if not this_stack_tx.empty:
         est_area = this_stack_tx.iloc[0]['Area (sqft)']
@@ -71,13 +61,13 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     return est_price, est_psf, type_tag, recent_comps, est_area
 
 # --- 渲染仪表盘 ---
-def render_gauge(est_psf, min_psf, max_psf):
+def render_gauge(est_psf, min_psf, max_psf, font_size=12):
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = est_psf,
-        number = {'suffix': " psf", 'font': {'size': 24}}, # 字体改小一点防止遮挡
+        number = {'suffix': " psf", 'font': {'size': font_size * 2}}, 
         domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': 14, 'color': "gray"}},
+        title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': font_size + 2, 'color': "gray"}},
         gauge = {
             'axis': {'range': [min_psf*0.9, max_psf*1.1], 'tickwidth': 1, 'tickcolor': "darkblue"},
             'bar': {'color': "#2563eb"},
@@ -85,9 +75,9 @@ def render_gauge(est_psf, min_psf, max_psf):
             'borderwidth': 2,
             'bordercolor': "gray",
             'steps': [
-                {'range': [min_psf, max_psf], 'color': "#e0f2fe"}, # 浅蓝区间
-                {'range': [min_psf*0.9, min_psf], 'color': "#fef2f2"}, # 低于区间(红)
-                {'range': [max_psf, max_psf*1.1], 'color': "#fef2f2"}  # 高于区间(红)
+                {'range': [min_psf, max_psf], 'color': "#e0f2fe"},
+                {'range': [min_psf*0.9, min_psf], 'color': "#fef2f2"},
+                {'range': [max_psf, max_psf*1.1], 'color': "#fef2f2"}
             ],
             'threshold': {
                 'line': {'color': "red", 'width': 4},
@@ -96,17 +86,17 @@ def render_gauge(est_psf, min_psf, max_psf):
             }
         }
     ))
-    # 修复遮挡：增加 Margin，尤其是底部
+    # 增加 Margin 防止遮挡
     fig.update_layout(
         height=250, 
         margin=dict(l=30, r=30, t=50, b=50),
         paper_bgcolor="rgba(0,0,0,0)",
-        font={'family': "Arial"}
+        font={'family': "Arial", 'size': font_size}
     )
     return fig
 
-# --- 主渲染函数 ---
-def render(df):
+# --- 主渲染函数 (参数签名已修复) ---
+def render(df, project_name="Project", chart_font_size=12):
     st.subheader("🤖 智能估值 (AVM)")
 
     # 1. 接收参数
@@ -146,7 +136,7 @@ def render(df):
         )
         st.caption(f"基于 {len(comps)} 笔近期参考交易")
         
-        # 价格区间置信度 (简单模拟 +/- 5%)
+        # 价格区间置信度
         low_bound = est_price * 0.95
         high_bound = est_price * 1.05
         st.markdown(f"""
@@ -157,10 +147,10 @@ def render(df):
         """, unsafe_allow_html=True)
 
     with c2:
-        # 仪表盘
+        # 仪表盘 (传入字体大小)
         min_p = comps['Unit Price ($ psf)'].min()
         max_p = comps['Unit Price ($ psf)'].max()
-        st.plotly_chart(render_gauge(est_psf, min_p, max_p), use_container_width=True)
+        st.plotly_chart(render_gauge(est_psf, min_p, max_p, chart_font_size), use_container_width=True)
 
     st.divider()
 
@@ -169,11 +159,10 @@ def render(df):
     this_unit_hist = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (pd.to_numeric(df['Floor'], errors='coerce') == floor)].copy()
     
     if not this_unit_hist.empty:
-        # 修复：强制按 Sale Date 倒序 (最新的在上面)
+        # 强制按 Sale Date 倒序
         this_unit_hist['Sale Date'] = pd.to_datetime(this_unit_hist['Sale Date'])
         this_unit_hist = this_unit_hist.sort_values('Sale Date', ascending=False)
         
-        # 格式化显示
         display_hist = this_unit_hist[['Sale Date', 'Sale Price', 'Unit Price ($ psf)', 'Type']].copy()
         display_hist['Sale Date'] = display_hist['Sale Date'].dt.strftime('%Y-%m-%d')
         display_hist['Sale Price'] = display_hist['Sale Price'].apply(lambda x: f"${x:,.0f}")
@@ -196,10 +185,9 @@ def render(df):
     st.divider()
 
     # 6. 参考交易 (Surrounding Reference)
-    # 修复：标题改为“参考交易”，并增加“户型”列
     st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
     
-    # 按相关性排序 (权重越高越靠前)
+    # 按权重排序
     comps = comps.sort_values('Weight', ascending=False).head(10)
     
     comp_display = comps[['Sale Date', 'BLK', 'Floor', 'Stack', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']].copy()
@@ -208,7 +196,6 @@ def render(df):
     comp_display['Unit Price ($ psf)'] = comp_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
     comp_display['Unit'] = comp_display['BLK'] + " #" + comp_display['Floor'] + "-" + comp_display['Stack']
     
-    # 调整列顺序，加入“Type (户型)”
     final_cols = ['Sale Date', 'Unit', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']
     
     st.dataframe(
@@ -218,7 +205,7 @@ def render(df):
         column_config={
             "Sale Date": "日期",
             "Unit": "单位",
-            "Type": "户型",   # <--- 新增
+            "Type": "户型",
             "Area (sqft)": "面积",
             "Sale Price": "总价",
             "Unit Price ($ psf)": "尺价"
