@@ -4,32 +4,52 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 
-# --- 核心估值逻辑 ---
-def calculate_avm(df, target_blk, target_floor, target_stack):
-    # 0. 数据清洗与容错 (新增)
-    # 确保列名统一，防止 KeyError
-    df = df.copy() # 避免修改原始缓存
+# --- 辅助：统一数据清洗 ---
+def clean_and_prepare_data(df_raw):
+    """
+    统一处理列名映射和缺失值，确保后续逻辑使用的字段都存在。
+    """
+    df = df_raw.copy()
     
-    # 映射常见列名差异
-    col_map = {
+    # 1. 列名映射字典 (兼容常见格式)
+    # 左边是可能出现的原始列名，右边是程序内部标准名
+    rename_map = {
         'Transacted Price ($)': 'Sale Price',
         'Area (SQFT)': 'Area (sqft)',
-        'Unit Price ($ psm)': 'Unit Price ($ psf)' # 暂时占位，下面会重算
+        'Unit Price ($ psf)': 'Unit Price ($ psf)',
+        'Unit Price ($ psm)': 'Unit Price ($ psm)',
+        'Sale Date': 'Sale Date',
+        'No. of Bedroom': 'Type', # 将卧室数量映射为户型
+        'Property Type': 'Type'   # 备选
     }
-    df.rename(columns=col_map, inplace=True)
     
-    # 确保 Sale Date 是时间格式
+    # 执行重命名 (忽略不存在的列)
+    df.rename(columns=rename_map, inplace=True)
+    
+    # 2. 确保核心列存在
+    # 如果 'Type' 还是不存在 (说明没找到 No. of Bedroom)，创建默认值
+    if 'Type' not in df.columns:
+        df['Type'] = "N/A"
+        
+    # 确保时间格式
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
-    
-    # 关键修复：如果缺少尺价列，手动计算
+
+    # 3. 补全尺价 (如果缺失)
     if 'Unit Price ($ psf)' not in df.columns:
+        # 尝试从总价和面积计算
         if 'Sale Price' in df.columns and 'Area (sqft)' in df.columns:
             df['Unit Price ($ psf)'] = df['Sale Price'] / df['Area (sqft)']
         else:
-            # 如果连总价或面积都没有，直接返回空
-            return None, None, "Data Error", pd.DataFrame(), 0
+            # 极端情况：创建空列防止报错
+            df['Unit Price ($ psf)'] = 0
+            
+    return df
 
+# --- 核心估值逻辑 ---
+def calculate_avm(df, target_blk, target_floor, target_stack):
+    # 注意：传入的 df 已经是经过 clean_and_prepare_data 处理过的
+    
     # 1. 寻找同类户型 (Maisonette vs Typical)
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
@@ -55,8 +75,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     # 3. 楼层调整
     recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     
-    # 计算调整后的 PSF (Formula: Target PSF = Comp PSF * (1 + diff * 0.5%))
-    # 注意：这里使用了容错后的 'Unit Price ($ psf)' 列
+    # 计算调整后的 PSF
     recent_comps['Adj_PSF'] = recent_comps.apply(
         lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
         axis=1
@@ -84,6 +103,11 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
 
 # --- 渲染仪表盘 ---
 def render_gauge(est_psf, min_psf, max_psf, font_size=12):
+    # 防止 min/max 相等导致图表崩溃
+    if min_psf == max_psf:
+        min_psf = est_psf * 0.8
+        max_psf = est_psf * 1.2
+        
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = est_psf,
@@ -117,7 +141,7 @@ def render_gauge(est_psf, min_psf, max_psf, font_size=12):
     return fig
 
 # --- 主渲染函数 ---
-def render(df, project_name="Project", chart_font_size=12):
+def render(df_raw, project_name="Project", chart_font_size=12):
     st.subheader("🤖 智能估值 (AVM)")
 
     # 1. 接收参数
@@ -128,16 +152,18 @@ def render(df, project_name="Project", chart_font_size=12):
         return
 
     blk, floor, stack = target['blk'], target['floor'], target['stack']
+
+    # 2. 全局数据清洗 (关键步骤：修复列名缺失问题)
+    df = clean_and_prepare_data(df_raw)
     
-    # 2. 计算估值
-    # 这里会自动处理缺列问题
+    # 3. 计算估值
     est_price, est_psf, type_tag, comps, area = calculate_avm(df, blk, floor, stack)
     
     if est_price is None:
-        st.error(f"数据不足或格式错误，无法评估 {blk} #{floor}-{stack}")
+        st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
         return
 
-    # 3. 顶部概览卡片
+    # 4. 顶部概览卡片
     st.markdown(f"""
     <div style="background-color:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:20px;">
         <h3 style="margin:0; color:#1e293b;">{blk} #{int(floor):02d}-{stack}</h3>
@@ -147,7 +173,7 @@ def render(df, project_name="Project", chart_font_size=12):
     </div>
     """, unsafe_allow_html=True)
 
-    # 4. 估值核心展示 (列布局)
+    # 5. 估值核心展示
     c1, c2 = st.columns([1, 1.5])
     
     with c1:
@@ -169,25 +195,18 @@ def render(df, project_name="Project", chart_font_size=12):
 
     with c2:
         # 仪表盘
-        min_p = comps['Unit Price ($ psf)'].min()
-        max_p = comps['Unit Price ($ psf)'].max()
-        st.plotly_chart(render_gauge(est_psf, min_p, max_p, chart_font_size), use_container_width=True)
+        if not comps.empty:
+            min_p = comps['Unit Price ($ psf)'].min()
+            max_p = comps['Unit Price ($ psf)'].max()
+            st.plotly_chart(render_gauge(est_psf, min_p, max_p, chart_font_size), use_container_width=True)
 
     st.divider()
 
-    # 5. 本单位历史 (按时间倒序)
+    # 6. 本单位历史 (按时间倒序)
     st.markdown("#### 📜 本单位历史 (Unit History)")
-    # 使用容错后的 df
-    # 重新计算一次列名确保一致（因为 calculate_avm 里的 df 是 copy 的）
-    df_safe = df.copy()
-    if 'Unit Price ($ psf)' not in df_safe.columns:
-        if 'Sale Price' in df_safe.columns and 'Area (sqft)' in df_safe.columns:
-            df_safe['Unit Price ($ psf)'] = df_safe['Sale Price'] / df_safe['Area (sqft)']
-            
-    this_unit_hist = df_safe[(df_safe['BLK'] == blk) & (df_safe['Stack'] == stack) & (pd.to_numeric(df_safe['Floor'], errors='coerce') == floor)].copy()
+    this_unit_hist = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (pd.to_numeric(df['Floor'], errors='coerce') == floor)].copy()
     
     if not this_unit_hist.empty:
-        this_unit_hist['Sale Date'] = pd.to_datetime(this_unit_hist['Sale Date'])
         this_unit_hist = this_unit_hist.sort_values('Sale Date', ascending=False)
         
         display_hist = this_unit_hist[['Sale Date', 'Sale Price', 'Unit Price ($ psf)', 'Type']].copy()
@@ -211,7 +230,7 @@ def render(df, project_name="Project", chart_font_size=12):
 
     st.divider()
 
-    # 6. 参考交易 (Surrounding Reference)
+    # 7. 参考交易 (Surrounding Reference)
     st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
     
     comps = comps.sort_values('Weight', ascending=False).head(10)
