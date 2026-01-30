@@ -4,14 +4,12 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import re
 import streamlit as st
-import plotly.graph_objects as go # [新增] 用于渲染仪表盘
+import plotly.graph_objects as go 
 
 # ==================== 1. 全局配置与常量 ====================
 
-# [V202] 免责声明 (全局共享)
 CUSTOM_DISCLAIMER = "Disclaimer: Estimates (AVM) for reference only. Not certified valuations. Source: URA/Huttons. No warranty on accuracy."
 
-# [V202] 标准列名映射 (统一数据清洗口径)
 COLUMN_RENAME_MAP = {
     'Transacted Price ($)': 'Sale Price',
     'Area (SQFT)': 'Area (sqft)',
@@ -31,13 +29,12 @@ try:
     AGENT_PROFILE = dict(st.secrets["agent"])
 except Exception:
     AGENT_PROFILE = {
-        "Name": "Henry GUO",
-        "Title": "Associate District Director",
-        "Company": "Huttons Asia Pte Ltd",
-        "License": "L3008899K",
-        "RES_No": "R059451F", 
-        "Mobile": "+65 8808 6086",
-        "Email": "henry.guo@huttons.com"
+        "name": "Henry", 
+        "title": "Associate Division Director",
+        "agency": "Huttons Asia Pte Ltd",
+        "license": "L3008899K",
+        "contact": "+65 9123 4567",
+        "email": "henry@huttons.com"
     }
 
 try:
@@ -58,20 +55,15 @@ def format_currency(val):
     try: return f"${val:,.0f}"
     except: return val
 
-# [V202] 提取为独立函数，供 load_data 和各 Tab 使用
 def format_unit(floor, stack):
     try:
-        # 尝试转换为数字以去除前导零或处理浮点
         f_num = int(float(floor))
         s_str = str(stack).strip()
-        # Stack 如果是纯数字，补齐2位；如果是 10A 这种，保持原样
         s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
         return f"#{f_num:02d}-{s_fmt}"
     except:
-        # 出错时回退到原始字符串拼接
         return f"#{floor}-{stack}"
 
-# [V202] 新增脱敏格式化
 def format_unit_masked(floor):
     try:
         f_num = int(float(floor))
@@ -100,10 +92,10 @@ def load_data(file_or_url):
 
         df.columns = df.columns.str.strip()
         
-        # [V202] 使用统一映射清洗列名 (可选，这里先保留您的原始逻辑，避免改动太大)
-        # df.rename(columns=COLUMN_RENAME_MAP, inplace=True) 
+        # 统一列名清洗
+        df.rename(columns=COLUMN_RENAME_MAP, inplace=True) 
         
-        for col in ['Sale Price', 'Sale PSF', 'Area (sqft)']:
+        for col in ['Sale Price', 'Sale PSF', 'Area (sqft)', 'Unit Price ($ psf)']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace(r'[$,]', '', regex=True)
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -116,11 +108,15 @@ def load_data(file_or_url):
         if 'BLK' in df.columns: df['BLK'] = df['BLK'].astype(str).str.strip()
         if 'Stack' in df.columns: df['Stack'] = df['Stack'].astype(str).str.strip()
         if 'Floor' in df.columns: df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
+        
+        # 确保基础列存在，防止报错
+        for col in ['Type', 'Tenure', 'Tenure From', 'Sub Type']:
+            if col not in df.columns: df[col] = "N/A"
 
         if 'Stack' in df.columns and 'Floor_Num' in df.columns:
-            # [V202] 使用上方定义的全局函数
             df['Unit'] = df.apply(lambda row: format_unit(row['Floor_Num'], row['Stack']), axis=1)
             df['Unit_ID'] = df['BLK'].astype(str) + "-" + df['Stack'].astype(str) + "-" + df['Floor_Num'].astype(str)
+            
         return df
     except Exception as e: return None
 
@@ -138,6 +134,26 @@ def mark_penthouse(df):
     return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
 
 # ==================== 4. 业务逻辑与算法 ====================
+
+# [V203 Moved] 从 Tab 3 移动过来的市场趋势计算
+def calculate_market_trend(full_df):
+    """计算年化市场增长率 (用于 AVM 和 市场分析)"""
+    limit_date = datetime.now() - pd.DateOffset(months=36)
+    trend_data = full_df[full_df['Sale Date'] >= limit_date].copy()
+    if len(trend_data) < 10: return 0.0
+    
+    trend_data['Date_Ord'] = trend_data['Sale Date'].map(datetime.toordinal)
+    x = trend_data['Date_Ord']
+    y = trend_data['Unit Price ($ psf)']
+    
+    try:
+        slope, intercept = np.polyfit(x, y, 1)
+        avg_price = y.mean()
+        if avg_price == 0: return 0.0
+        # 将每日斜率转换为年化增长率
+        return max(-0.05, min(0.10, (slope / avg_price) * 365))
+    except:
+        return 0.0
 
 def detect_block_step(blk_df):
     if blk_df.empty: return 1
@@ -205,69 +221,8 @@ def estimate_inventory(df, category_col='Category'):
             
     return final_totals
 
-def get_dynamic_floor_premium(df, category):
-    # (保持原样...)
-    cat_df = df[df['Category'] == category].copy()
-    if cat_df.empty: return 0.005
-    recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
-    recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
-    grouped = recent_df.groupby(['BLK', 'Stack'])
-    rates = []
-    for _, group in grouped:
-        if len(group) < 2: continue
-        recs = group.to_dict('records')
-        for i in range(len(recs)):
-            for j in range(i + 1, len(recs)):
-                r1, r2 = recs[i], recs[j]
-                if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
-                floor_diff = r1['Floor_Num'] - r2['Floor_Num']
-                if floor_diff == 0: continue
-                if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
-                else: high, low, f_delta = r2, r1, -floor_diff
-                rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
-                if -0.005 < rate < 0.03: rates.append(rate)
-    if len(rates) >= 3:
-        fitted_rate = float(np.median(rates))
-        return max(0.001, min(0.015, fitted_rate))
-    else:
-        return 0.005
-
-def calculate_ssd_status(purchase_date):
-    # (保持原样...)
-    now, p_dt = datetime.now(), pd.to_datetime(purchase_date)
-    held_years = (now - p_dt).days / 365.25
-    rate, emoji, text = 0.0, "🟢", "SSD Free"
-    if p_dt >= datetime(2025, 7, 4):
-        if held_years < 1: rate, emoji, text = 0.16, "🔴", "SSD 16%"
-        elif held_years < 2: rate, emoji, text = 0.12, "🔴", "SSD 12%"
-        elif held_years < 3: rate, emoji, text = 0.08, "🔴", "SSD 8%"
-        elif held_years < 4: rate, emoji, text = 0.04, "🔴", "SSD 4%"
-    elif p_dt >= datetime(2017, 3, 11):
-        if held_years < 1: rate, emoji, text = 0.12, "🔴", "SSD 12%"
-        elif held_years < 2: rate, emoji, text = 0.08, "🔴", "SSD 8%"
-        elif held_years < 3: rate, emoji, text = 0.04, "🔴", "SSD 4%"
-    return rate, emoji, text
-
-def get_market_trend_model(df):
-    # (保持原样...)
-    df_clean = df.dropna(subset=['Sale PSF', 'Date_Ordinal']).copy()
-    if len(df_clean) < 10: return None, 0 
-    q1 = df_clean['Sale PSF'].quantile(0.10)
-    q3 = df_clean['Sale PSF'].quantile(0.90)
-    df_clean = df_clean[(df_clean['Sale PSF'] >= q1) & (df_clean['Sale PSF'] <= q3)]
-    x = df_clean['Date_Ordinal'].values
-    y = df_clean['Sale PSF'].values
-    coeffs = np.polyfit(x, y, 1) 
-    trend_func = np.poly1d(coeffs)
-    y_pred = trend_func(x)
-    ss_res = np.sum((y - y_pred) ** 2)
-    ss_tot = np.sum((y - np.mean(y)) ** 2)
-    r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-    return trend_func, r2
-
 # ==================== 5. 共享图表组件 ====================
 
-# [V202] 提取自 tab3_avm.py，供多处复用
 def render_gauge(est_psf, font_size=12):
     range_min = est_psf * 0.90
     range_max = est_psf * 1.10
@@ -311,20 +266,3 @@ def render_gauge(est_psf, font_size=12):
         font={'family': "Arial", 'size': 11}
     )
     return fig
-
-# ... (Calculate AVM 和 Resale Metrics 保持原样，未改动)
-def calculate_avm(df, blk, stack, floor):
-    # (代码省略，保持您原文件的内容，此处不做改动)
-    # ... 请确保保留原文件后续的 calculate_avm 代码 ...
-    # 为节省篇幅，这里假定您只替换上半部分，或者您复制原 utils.py 的后半部分接在 render_gauge 后面
-    # 如果您直接全选覆盖，请务必把原 utils.py 最后的 calculate_avm 和 calculate_resale_metrics 拷回来
-    # 或者让我知道，我为您提供包含所有内容的完整代码。
-    
-    # ⚠️ 临时占位，请替换为原代码
-    target_unit = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (df['Floor_Num'] == floor)]
-    # ... (原有逻辑)
-    return None, None, None, None, None, pd.DataFrame(), None # 占位
-
-def calculate_resale_metrics(df):
-    # (原有逻辑)
-    return pd.DataFrame()
