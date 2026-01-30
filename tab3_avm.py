@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+import re
 
 # --- 辅助：统一数据清洗 ---
 def clean_and_prepare_data(df_raw):
@@ -11,46 +12,49 @@ def clean_and_prepare_data(df_raw):
     """
     df = df_raw.copy()
     
-    # 1. 列名映射字典 (兼容常见格式)
-    # 左边是可能出现的原始列名，右边是程序内部标准名
+    # 1. 列名映射字典
     rename_map = {
         'Transacted Price ($)': 'Sale Price',
         'Area (SQFT)': 'Area (sqft)',
         'Unit Price ($ psf)': 'Unit Price ($ psf)',
         'Unit Price ($ psm)': 'Unit Price ($ psm)',
         'Sale Date': 'Sale Date',
-        'No. of Bedroom': 'Type', # 将卧室数量映射为户型
-        'Property Type': 'Type'   # 备选
+        'No. of Bedroom': 'Type', 
+        'Property Type': 'Type'
     }
-    
-    # 执行重命名 (忽略不存在的列)
     df.rename(columns=rename_map, inplace=True)
     
     # 2. 确保核心列存在
-    # 如果 'Type' 还是不存在 (说明没找到 No. of Bedroom)，创建默认值
     if 'Type' not in df.columns:
         df['Type'] = "N/A"
         
-    # 确保时间格式
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
 
-    # 3. 补全尺价 (如果缺失)
+    # 3. 补全尺价
     if 'Unit Price ($ psf)' not in df.columns:
-        # 尝试从总价和面积计算
         if 'Sale Price' in df.columns and 'Area (sqft)' in df.columns:
             df['Unit Price ($ psf)'] = df['Sale Price'] / df['Area (sqft)']
         else:
-            # 极端情况：创建空列防止报错
             df['Unit Price ($ psf)'] = 0
             
     return df
 
+# --- 辅助：格式化单元号 ---
+def format_unit(floor, stack):
+    # 尝试转为数字进行格式化 (#05-04)，如果失败则原样返回
+    try:
+        f_num = int(float(floor))
+        s_str = str(stack)
+        # 如果 stack 是纯数字，补0；如果是 10A 这种，不补
+        s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
+        return f"#{f_num:02d}-{s_fmt}"
+    except:
+        return f"#{floor}-{stack}"
+
 # --- 核心估值逻辑 ---
 def calculate_avm(df, target_blk, target_floor, target_stack):
-    # 注意：传入的 df 已经是经过 clean_and_prepare_data 处理过的
-    
-    # 1. 寻找同类户型 (Maisonette vs Typical)
+    # 1. 寻找同类户型
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
     
@@ -61,7 +65,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
         type_tag = "Apartment (平层)"
     
-    # 2. 时间权重 (近18个月 -> 近36个月)
+    # 2. 时间权重
     limit_date = datetime.now() - pd.DateOffset(months=18)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
@@ -75,7 +79,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     # 3. 楼层调整
     recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     
-    # 计算调整后的 PSF
+    # Target PSF = Comp PSF * (1 + diff * 0.5%)
     recent_comps['Adj_PSF'] = recent_comps.apply(
         lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
         axis=1
@@ -87,7 +91,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     weighted_psf = (recent_comps['Adj_PSF'] * recent_comps['Weight']).sum() / recent_comps['Weight'].sum()
     
-    # 估值结果
     est_psf = weighted_psf
     
     # 寻找本单位面积
@@ -103,7 +106,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
 
 # --- 渲染仪表盘 ---
 def render_gauge(est_psf, min_psf, max_psf, font_size=12):
-    # 防止 min/max 相等导致图表崩溃
     if min_psf == max_psf:
         min_psf = est_psf * 0.8
         max_psf = est_psf * 1.2
@@ -153,7 +155,7 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     blk, floor, stack = target['blk'], target['floor'], target['stack']
 
-    # 2. 全局数据清洗 (关键步骤：修复列名缺失问题)
+    # 2. 全局数据清洗
     df = clean_and_prepare_data(df_raw)
     
     # 3. 计算估值
@@ -194,7 +196,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         """, unsafe_allow_html=True)
 
     with c2:
-        # 仪表盘
         if not comps.empty:
             min_p = comps['Unit Price ($ psf)'].min()
             max_p = comps['Unit Price ($ psf)'].max()
@@ -239,7 +240,12 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     comp_display['Sale Date'] = comp_display['Sale Date'].dt.strftime('%Y-%m-%d')
     comp_display['Sale Price'] = comp_display['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
     comp_display['Unit Price ($ psf)'] = comp_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
-    comp_display['Unit'] = comp_display['BLK'] + " #" + comp_display['Floor'] + "-" + comp_display['Stack']
+    
+    # 修复：使用 apply 进行强类型拼接，防止 TypeError
+    comp_display['Unit'] = comp_display.apply(
+        lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
+        axis=1
+    )
     
     final_cols = ['Sale Date', 'Unit', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']
     
