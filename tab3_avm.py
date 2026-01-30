@@ -52,40 +52,30 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
     
-    # 1. 筛选 Comparables
     if is_maisonette:
         comps = df[df['BLK'].isin(maisonette_blks)].copy()
     else:
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
     
-    # 2. 获取本单位/Stack 的基础信息
     this_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
     
-    # --- 面积修正逻辑 Start ---
     if not this_stack_tx.empty:
-        # 情况A: 本单位有历史交易 -> 直接用
         est_area = this_stack_tx.iloc[0]['Area (sqft)']
-        
-        # 获取最新的属性信息
         latest_rec = this_stack_tx.sort_values('Sale Date', ascending=False).iloc[0]
         info_tenure = str(latest_rec.get('Tenure', '-'))
         info_from = str(latest_rec.get('Tenure From', '-'))
         info_subtype = str(latest_rec.get('Sub Type', '-'))
     else:
-        # 情况B: 本单位无交易 -> 尝试找同 Stack 的其他楼层 (面积通常相同)
-        # 这一步非常关键，解决了“对不上”的问题
+        # 同 Stack 查找
         same_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
         if not same_stack_tx.empty:
-             est_area = same_stack_tx.iloc[0]['Area (sqft)'] # 同Stack 任意一间
+             est_area = same_stack_tx.iloc[0]['Area (sqft)']
         else:
-            # 情况C: 同 Stack 也没交易 -> 只能用同类户型中位数 (保底)
             est_area = recent_comps['Area (sqft)'].median() if 'recent_comps' in locals() else comps['Area (sqft)'].median()
         
-        # 属性信息用众数填充
         info_tenure = comps['Tenure'].mode()[0] if not comps['Tenure'].empty else '-'
         info_from = comps['Tenure From'].mode()[0] if not comps['Tenure From'].empty else '-'
         info_subtype = comps['Sub Type'].mode()[0] if not comps['Sub Type'].empty else '-'
-    # --- 面积修正逻辑 End ---
 
     limit_date = datetime.now() - pd.DateOffset(months=18)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
@@ -118,12 +108,14 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     return est_price, est_psf, extra_info, recent_comps, est_area
 
-# --- 渲染仪表盘 ---
+# --- 渲染仪表盘 (V164: 绝对居中修正) ---
 def render_gauge(est_psf, font_size=12):
-    # 合理区间 +/- 10%
+    # 1. 蓝色区间 (Steps): +/- 10%
     range_min = est_psf * 0.90
     range_max = est_psf * 1.10
     
+    # 2. 仪表盘全长 (Axis): +/- 20%
+    # 这种设定下，指针 (est_psf) 必定在正中间
     axis_min = est_psf * 0.80
     axis_max = est_psf * 1.20
         
@@ -134,14 +126,23 @@ def render_gauge(est_psf, font_size=12):
         domain = {'x': [0, 1], 'y': [0, 1]},
         title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': 14, 'color': "gray"}},
         gauge = {
-            'axis': {'range': [axis_min, axis_max], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'axis': {
+                'range': [axis_min, axis_max], 
+                'tickwidth': 1, 
+                'tickcolor': "darkblue",
+                # 强制只显示 Min, Max 和 Est. PSF 三个刻度，避免视觉干扰
+                'tickvals': [int(axis_min), int(est_psf), int(axis_max)]
+            },
             'bar': {'thickness': 0}, 
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "#e5e7eb",
             'steps': [
-                {'range': [range_min, range_max], 'color': "#2563eb"}, 
+                # 左侧灰色区域 (-20% ~ -10%)
                 {'range': [axis_min, range_min], 'color': "#f3f4f6"},
+                # 中间蓝色区域 (-10% ~ +10%)
+                {'range': [range_min, range_max], 'color': "#2563eb"},
+                # 右侧灰色区域 (+10% ~ +20%)
                 {'range': [range_max, axis_max], 'color': "#f3f4f6"}
             ],
             'threshold': {
@@ -160,7 +161,7 @@ def render_gauge(est_psf, font_size=12):
     return fig
 
 # --- 主渲染函数 ---
-def render(df_raw, project_name="Braddell View", chart_font_size=12):
+def render(df_raw, project_name="Project", chart_font_size=12):
     st.subheader("🤖 智能估值 (AVM)")
 
     target = st.session_state.get('avm_target', None)
@@ -177,7 +178,7 @@ def render(df_raw, project_name="Braddell View", chart_font_size=12):
         st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
         return
 
-    # 概览卡片 (增加项目名称)
+    # 概览卡片
     info_parts = [f"{int(area):,} sqft"]
     if extra_info['tenure'] != '-': info_parts.append(str(extra_info['tenure']))
     if extra_info['from'] != '-': info_parts.append(f"From {str(extra_info['from'])}")
@@ -198,6 +199,7 @@ def render(df_raw, project_name="Braddell View", chart_font_size=12):
 
     c1, c2 = st.columns([1, 1.5])
     
+    # 3. 文字也严格对齐 +/- 10%
     low_bound = est_price * 0.90
     high_bound = est_price * 1.10
     
