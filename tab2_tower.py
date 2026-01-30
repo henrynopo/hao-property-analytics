@@ -7,11 +7,13 @@ from dateutil.relativedelta import relativedelta
 
 # --- 0. 核心跳转逻辑 ---
 def go_to_valuation(blk, floor, stack):
+    # 设置目标
     st.session_state['avm_target'] = {
         'blk': blk,
         'floor': int(floor),
         'stack': stack
     }
+    # 设置触发器
     st.session_state['trigger_tab_switch'] = True
 
 # --- 1. 数据清洗与辅助 ---
@@ -25,14 +27,13 @@ def clean_data(df_raw):
     }
     df.rename(columns=rename_map, inplace=True)
     
-    # 确保时间格式
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
         
     return df
 
 def get_ssd_display(purchase_date):
-    if pd.isna(purchase_date): return "", "" # 无交易记录时不显示SSD
+    if pd.isna(purchase_date): return "", "" 
     
     if not isinstance(purchase_date, datetime): purchase_date = pd.to_datetime(purchase_date)
     today = datetime.now()
@@ -44,13 +45,17 @@ def get_ssd_display(purchase_date):
 
     days_left = (ssd_deadline - today).days
     years_held = relativedelta(today, purchase_date).years + 1
-    rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
-    rate = rates.get(years_held, "4%")
     
-    # 简化显示以节省空间
-    if days_left < 90: return "🟨", f"{rate}"
-    elif days_left < 180: return "🟧", f"{rate}"
-    else: return "🟥", f"{rate}"
+    rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
+    rate_str = rates.get(years_held, "4%")
+    rate_val = int(rate_str.strip('%'))
+
+    if days_left < 90: return "🟨", f"{rate_str}"
+    elif days_left < 180: return "🟧", f"{rate_str}"
+    
+    if rate_val >= 12: return "⛔", f"{rate_str}"
+    elif rate_val == 8: return "🛑", f"{rate_str}"
+    else: return "🟥", f"{rate_str}"
 
 def format_unit(floor, stack):
     return f"#{int(floor):02d}-{str(stack).zfill(2) if str(stack).isdigit() else stack}"
@@ -60,33 +65,44 @@ def natural_key(string_):
 
 def shorten_type(type_str):
     if not isinstance(type_str, str): return "-"
-    # 缩写户型名称节省空间
     return type_str.replace("Bedroom", "Bed").replace("Maisonette", "Mais").replace("Apartment", "Apt")
 
 # --- 2. 渲染主函数 ---
 def render(df_raw, chart_font_size=12):
-    # 跳转执行器
-    if st.session_state.get('trigger_tab_switch'):
-        components.html("""<script>
+    # [修复 Bug 1] 状态初始化移到最前，确保 UI 渲染时已有状态
+    df = clean_data(df_raw)
+    all_blks = sorted(df['BLK'].unique(), key=natural_key)
+    
+    if 'selected_blk' not in st.session_state:
+        st.session_state.selected_blk = all_blks[0]
+
+    # [修复 Bug 2] 跳转执行器
+    # 只要检测到 trigger 为 True，就注入 JS，然后重置 trigger
+    if st.session_state.get('trigger_tab_switch', False):
+        components.html("""
+        <script>
+            // 尝试查找 Streamlit 的 Tab 按钮并点击第3个 (索引2)
             var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-            if (tabs.length > 2) { tabs[2].click(); window.parent.scrollTo(0, 0); }
-        </script>""", height=0)
+            if (tabs.length > 2) { 
+                tabs[2].click(); 
+                window.parent.scrollTo(0, 0);
+            }
+        </script>
+        """, height=0)
+        # 执行完后重置，防止无限刷新
         st.session_state['trigger_tab_switch'] = False
 
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # 预处理数据
-    df = clean_data(df_raw)
-    
-    # CSS: 调整按钮高度以容纳更多信息
+    # CSS: 保持紧凑布局
     st.markdown("""
         <style>
         div.stButton > button {
             width: 100%;
-            padding: 2px 0px !important;
-            font-size: 10px !important; 
-            line-height: 1.2 !important;
-            min-height: 75px !important; /* 增加高度 */
+            padding: 4px 2px !important;
+            font-size: 11px !important; 
+            line-height: 1.3 !important;
+            min-height: 55px !important;
             height: auto !important;
             background-color: #ffffff !important;
             border: 1px solid #e5e7eb !important;
@@ -95,26 +111,28 @@ def render(df_raw, chart_font_size=12):
             flex-direction: column;
             justify-content: center;
             align-items: center;
+            white-space: pre-wrap;
         }
         div.stButton > button:hover {
             border-color: #2563eb !important;
             background-color: #eff6ff !important;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
         [data-testid="column"] { padding: 0 2px !important; }
         </style>
     """, unsafe_allow_html=True)
 
-    # 楼座选择
-    all_blks = sorted(df['BLK'].unique(), key=natural_key)
-    if 'selected_blk' not in st.session_state: st.session_state.selected_blk = all_blks[0]
-
+    # 楼座选择 (Block Selection)
     st.write("选择楼座 (Block):")
     cols_per_row = 8
     rows = [all_blks[i:i + cols_per_row] for i in range(0, len(all_blks), cols_per_row)]
+    
     for row_blks in rows:
         cols = st.columns(len(row_blks))
         for idx, blk in enumerate(row_blks):
             with cols[idx]:
+                # 此时 st.session_state.selected_blk 必定有值，颜色判断准确
                 b_type = "primary" if st.session_state.selected_blk == blk else "secondary"
                 if st.button(blk, key=f"blk_{blk}", type=b_type, use_container_width=True):
                     st.session_state.selected_blk = blk
@@ -124,18 +142,14 @@ def render(df_raw, chart_font_size=12):
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     
-    # 处理楼层排序
     f_col = 'Floor_Num' if 'Floor_Num' in blk_df.columns else 'Floor'
     blk_df['F_Sort'] = pd.to_numeric(blk_df[f_col], errors='coerce').fillna(0).astype(int)
     
     all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
     floors = sorted(blk_df['F_Sort'].unique(), reverse=True)
     
-    # 构建交易映射 (最新一笔)
     tx_map = blk_df.sort_values('Sale Date').groupby(['F_Sort', 'Stack']).tail(1).set_index(['F_Sort', 'Stack']).to_dict('index')
 
-    # 构建静态信息补全映射 (Stack -> Mode Type/Area)
-    # 用于补全没有交易记录的单元
     stack_info_map = {}
     for s in all_stacks:
         s_data = blk_df[blk_df['Stack'] == s]
@@ -148,7 +162,6 @@ def render(df_raw, chart_font_size=12):
 
     st.markdown("---")
     
-    # 分段渲染
     chunk_size = 10
     stack_chunks = [all_stacks[i:i + chunk_size] for i in range(0, len(all_stacks), chunk_size)]
 
@@ -161,34 +174,25 @@ def render(df_raw, chart_font_size=12):
             for i, s in enumerate(current_stacks):
                 with cols[i]:
                     unit_no = format_unit(f, s)
-                    
-                    # 1. 尝试获取本单元交易数据
                     tx_data = tx_map.get((f, s))
                     
-                    # 2. 准备显示数据
                     if tx_data:
-                        # 有交易：显示真实数据
                         u_type = shorten_type(str(tx_data.get('Type', '-')))
-                        u_area = f"{int(tx_data.get('Area (sqft)', 0)):,}"
-                        ssd_icon, ssd_txt = get_ssd_display(tx_data['Sale Date'])
+                        u_area = int(tx_data.get('Area (sqft)', 0))
+                        ssd_icon, _ = get_ssd_display(tx_data['Sale Date'])
                     else:
-                        # 无交易：从 Stack 推断 (智能补全)
                         stack_defaults = stack_info_map.get(s, {})
                         u_type = shorten_type(str(stack_defaults.get('type', '-')))
-                        val_area = stack_defaults.get('area', 0)
-                        u_area = f"{int(val_area):,}" if val_area > 0 else "-"
-                        ssd_icon, ssd_txt = "", "" # 无交易自然无 SSD 状态
+                        u_area = int(stack_defaults.get('area', 0))
+                        ssd_icon = "" 
 
-                    # 3. 组合 Label (4行结构)
-                    # Line 1: 单元号
-                    # Line 2: 户型
-                    # Line 3: 面积
-                    # Line 4: SSD
+                    area_str = f"{u_area:,}sf" if u_area > 0 else "-"
                     
-                    # 如果没有SSD，为了美观可以留空或不显示
-                    ssd_line = f"{ssd_icon} {ssd_txt}" if ssd_icon else "⚪" 
+                    line2_parts = [u_type, area_str]
+                    if ssd_icon: line2_parts.append(ssd_icon)
+                    line2_str = " | ".join(line2_parts)
                     
-                    label = f"{unit_no}\n{u_type}\n{u_area} sqft\n{ssd_line}"
+                    label = f"{unit_no}\n{line2_str}"
                     
                     st.button(
                         label, 
@@ -200,11 +204,9 @@ def render(df_raw, chart_font_size=12):
                     )
         if len(stack_chunks) > 1: st.divider()
 
-    # 图例
     st.markdown("---")
-    st.info("🟨 0-3月 | 🟧 3-6月 | 🟥 6月以上 | 🟩 无SSD (已过禁售期)")
+    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")
     
-    # 底部列表逻辑保持精简
     with st.expander("🚀 全局机会扫描 (即将解禁)", expanded=False):
         latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor', 'Stack']).tail(1).copy()
         opportunity_list, watchlist = [], []
@@ -212,10 +214,10 @@ def render(df_raw, chart_font_size=12):
         for _, row in latest_txs.iterrows():
             icon, txt = get_ssd_display(row['Sale Date'])
             if "🟨" in icon:
-                opportunity_list.append({"label": f"{icon} {format_unit(row['Floor'], row['Stack'])} @ {row['BLK']}\n{txt}", 
+                opportunity_list.append({"label": f"{icon} {format_unit(row['Floor'], row['Stack'])} @ {row['BLK']} ({txt})", 
                                          "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']})
             elif "🟧" in icon:
-                watchlist.append({"label": f"{icon} {format_unit(row['Floor'], row['Stack'])} @ {row['BLK']}\n{txt}",
+                watchlist.append({"label": f"{icon} {format_unit(row['Floor'], row['Stack'])} @ {row['BLK']} ({txt})",
                                   "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']})
 
         c1, c2 = st.columns(2)
