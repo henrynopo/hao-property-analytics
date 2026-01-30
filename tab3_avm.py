@@ -1,101 +1,184 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import time  # [V206 Fix] 补回缺失的 time 模块，解决 NameError
-import io
-import urllib.parse
-import utils_address 
+from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
+import re
+import streamlit as st
+import plotly.graph_objects as go 
 
-# 引用 utils.py 中的通用组件
-from utils import (
-    AGENT_PROFILE, 
-    CUSTOM_DISCLAIMER, 
-    format_unit, 
-    format_unit_masked, 
-    render_gauge
-)
+# ==================== 1. 全局配置与常量 ====================
 
-# --- ReportLab Imports for PDF ---
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_RIGHT
+CUSTOM_DISCLAIMER = "Disclaimer: Estimates (AVM) for reference only. Not certified valuations. Source: URA/Huttons. No warranty on accuracy."
 
-# ==========================================
-# 🛠️ AVM 核心逻辑与数据处理
-# ==========================================
-
-def clean_and_prepare_data(df_raw):
-    df = df_raw.copy()
-    rename_map = {
-        'Transacted Price ($)': 'Sale Price',
-        'Area (SQFT)': 'Area (sqft)',
-        'Unit Price ($ psf)': 'Unit Price ($ psf)',
-        'Sale Date': 'Sale Date',
-        'Bedroom Type': 'Type',   
-        'No. of Bedroom': 'Type', 
-        'Tenure': 'Tenure',
-        'Lease Commencement Date': 'Tenure From',
-        'Tenure Start Date': 'Tenure From',
-        'Property Type': 'Sub Type',
-        'Building Type': 'Sub Type'
-    }
-    df.rename(columns=rename_map, inplace=True)
+# [V207] 增强版列名映射表 (兼容多种常见 CSV 格式)
+COLUMN_RENAME_MAP = {
+    'Transacted Price ($)': 'Sale Price',
+    'Sale Price ($)': 'Sale Price',
+    'Price ($)': 'Sale Price',
     
-    for col in ['Type', 'Tenure', 'Tenure From', 'Sub Type']:
-        if col not in df.columns: df[col] = "N/A"
+    'Area (SQFT)': 'Area (sqft)',
+    'Area(sqft)': 'Area (sqft)',
     
-    df['Type'] = df['Type'].astype(str)
-    if 'Sale Date' in df.columns: df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
+    'Unit Price ($ psf)': 'Unit Price ($ psf)',
+    'Sale PSF': 'Unit Price ($ psf)',
+    'Unit Price ($ psm)': 'Unit Price ($ psm)',
     
-    if 'Unit Price ($ psf)' not in df.columns:
-        if 'Sale Price' in df.columns and 'Area (sqft)' in df.columns:
-            df['Unit Price ($ psf)'] = df['Sale Price'] / df['Area (sqft)']
-        else:
-            df['Unit Price ($ psf)'] = 0
-            
-    df['Floor_Int'] = pd.to_numeric(df['Floor'], errors='coerce').fillna(0).astype(int)
-    return df
+    'Sale Date': 'Sale Date',
+    'Date of Sale': 'Sale Date',
+    
+    'Bedroom Type': 'Type',   
+    'No. of Bedroom': 'Type', 
+    'Property Type': 'Sub Type',
+    'Building Type': 'Sub Type',
+    
+    'Tenure': 'Tenure',
+    'Lease Commencement Date': 'Tenure From',
+    'Tenure Start Date': 'Tenure From'
+}
 
-# 3行紧凑地址格式
-def get_address_template(project_name, blk, unit_str):
-    """根据 Project + Block 查找地址"""
+# [V207 FIX] 健壮的 Agent Profile 加载逻辑
+# 无论 Secrets 里是用 "Company" 还是 "agency"，大写还是小写，这里都会标准化
+def get_agent_profile():
+    # 1. 尝试从 Secrets 读取
     try:
-        street, postal = utils_address.find_address_info(project_name, blk)
-    except AttributeError:
-        street, postal = project_name, ""
+        raw = dict(st.secrets["agent"])
+    except Exception:
+        raw = {}
+        
+    # 2. 定义默认值
+    defaults = {
+        "name": "Henry", 
+        "title": "Associate Division Director",
+        "agency": "Huttons Asia Pte Ltd",
+        "license": "L3008899K",
+        "contact": "+65 9123 4567",
+        "email": "henry@huttons.com"
+    }
     
-    if not street: street = project_name 
-    postal_str = f"Singapore {postal}" if postal else "Singapore XXXXXX"
+    # 3. 标准化构建 (优先用 Secrets，支持别名映射)
+    profile = {}
+    profile['name'] = raw.get('name', raw.get('Name', defaults['name']))
+    profile['title'] = raw.get('title', raw.get('Title', defaults['title']))
+    # 关键修复: 兼容 Company / agency
+    profile['agency'] = raw.get('agency', raw.get('Company', raw.get('company', defaults['agency']))) 
+    profile['license'] = raw.get('license', raw.get('License', defaults['license']))
+    # 关键修复: 兼容 Mobile / contact
+    profile['contact'] = raw.get('contact', raw.get('Mobile', raw.get('mobile', defaults['contact'])))
+    profile['email'] = raw.get('email', raw.get('Email', defaults['email']))
     
-    return f"Block {blk} {street}\n{unit_str} {project_name}\n{postal_str}"
+    return profile
 
-def get_unit_specs(df, target_blk, target_floor, target_stack):
-    this_unit = df[
-        (df['BLK'] == target_blk) & 
-        (df['Stack'] == target_stack) & 
-        (df['Floor_Int'] == int(target_floor))
-    ]
-    if not this_unit.empty:
-        rec = this_unit.sort_values('Sale Date', ascending=False).iloc[0]
-        return rec['Area (sqft)'], rec['Type'], 'History', rec['Sale Price'], rec['Sale Date']
-    
-    same_stack = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
-    if not same_stack.empty:
-        mode_area = same_stack['Area (sqft)'].mode()
-        area = mode_area[0] if not mode_area.empty else same_stack['Area (sqft)'].mean()
-        mode_type = same_stack['Type'].mode()
-        u_type = mode_type[0] if not mode_type.empty else "N/A"
-        return area, u_type, 'Stack Inference', 0, None
-    
-    default_area = df['Area (sqft)'].median() if not df.empty else 1000
-    default_type = df['Type'].mode()[0] if not df.empty else "3 Bedroom"
-    return default_area, default_type, 'Global Default', 0, None
+AGENT_PROFILE = get_agent_profile()
+
+try:
+    project_config = dict(st.secrets["projects"])
+    cleaned_config = {k: (None if v == "None" else v) for k, v in project_config.items()}
+    PROJECTS = cleaned_config
+except Exception:
+    PROJECTS = {
+        "📂 手动上传 CSV": None,
+    }
+
+# ==================== 2. 通用格式化工具 ====================
+
+def natural_key(text):
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(text))]
+
+def format_currency(val):
+    try: return f"${val:,.0f}"
+    except: return val
+
+def format_unit(floor, stack):
+    try:
+        f_num = int(float(floor))
+        s_str = str(stack).strip()
+        s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
+        return f"#{f_num:02d}-{s_fmt}"
+    except:
+        return f"#{floor}-{stack}"
+
+def format_unit_masked(floor):
+    try:
+        f_num = int(float(floor))
+        return f"#{f_num:02d}-XX"
+    except:
+        return f"#{floor}-XX"
+
+# ==================== 3. 数据加载与清洗 ====================
+
+@st.cache_data(ttl=300)
+def load_data(file_or_url):
+    try:
+        # 1. 读取数据
+        if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
+        try:
+            # 智能探测表头行
+            df_temp = pd.read_csv(file_or_url, header=None, nrows=20)
+            header_row = -1
+            for i, row in df_temp.iterrows():
+                row_str = row.astype(str).str.cat(sep=',')
+                if "Sale Date" in row_str or "BLK" in row_str or "Transacted Price" in row_str:
+                    header_row = i; break
+            
+            if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
+            df = pd.read_csv(file_or_url, header=header_row if header_row != -1 else 0)
+        except:
+            if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
+            df = pd.read_csv(file_or_url)
+
+        # 2. 清洗列名
+        df.columns = df.columns.str.strip()
+        df.rename(columns=COLUMN_RENAME_MAP, inplace=True) # 应用映射
+        
+        # 3. 清洗数值列
+        numeric_cols = ['Sale Price', 'Unit Price ($ psf)', 'Area (sqft)']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(r'[$,]', '', regex=True)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # 4. 清洗日期
+        if 'Sale Date' in df.columns:
+            df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
+            df['Sale Year'] = df['Sale Date'].dt.year
+            df['Date_Ordinal'] = df['Sale Date'].map(datetime.toordinal)
+
+        # 5. 清洗地址信息
+        if 'BLK' in df.columns: df['BLK'] = df['BLK'].astype(str).str.strip()
+        if 'Stack' in df.columns: df['Stack'] = df['Stack'].astype(str).str.strip()
+        if 'Floor' in df.columns: df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
+        
+        # 补全缺失的基础列
+        for col in ['Type', 'Tenure', 'Tenure From', 'Sub Type']:
+            if col not in df.columns: df[col] = "N/A"
+
+        # 6. 生成衍生列
+        if 'Stack' in df.columns and 'Floor_Num' in df.columns:
+            df['Unit'] = df.apply(lambda row: format_unit(row['Floor_Num'], row['Stack']), axis=1)
+            df['Unit_ID'] = df['BLK'].astype(str) + "-" + df['Stack'].astype(str) + "-" + df['Floor_Num'].astype(str)
+            
+        return df
+    except Exception as e:
+        # st.error(f"Data Load Error: {str(e)}") # 可选：屏蔽详细错误
+        return None
+
+def auto_categorize(df, method):
+    if method == "按卧室数量 (Bedroom Type)":
+        target_cols = ['Type', 'Bedroom Type', 'Bedrooms']
+        found = next((c for c in df.columns if c in target_cols), None)
+        return df[found].astype(str).str.strip().str.upper() if found else pd.Series(["Unknown"] * len(df))
+    elif method == "按楼座 (Block)": return df['BLK']
+    else: return df['Area (sqft)'].apply(lambda x: "Small" if x<800 else "Medium" if x<1200 else "Large" if x<1600 else "X-Large" if x<2500 else "Giant")
+
+def mark_penthouse(df):
+    if 'Area (sqft)' not in df.columns or 'Category' not in df.columns: return pd.Series([False] * len(df))
+    medians = df.groupby('Category')['Area (sqft)'].median()
+    return df.apply(lambda row: row['Area (sqft)'] > (medians.get(row['Category'], 0) * 1.4), axis=1)
+
+# ==================== 4. 业务逻辑与算法 ====================
 
 def calculate_market_trend(full_df):
+    """计算年化市场增长率"""
     limit_date = datetime.now() - pd.DateOffset(months=36)
     trend_data = full_df[full_df['Sale Date'] >= limit_date].copy()
     if len(trend_data) < 10: return 0.0
@@ -112,344 +195,155 @@ def calculate_market_trend(full_df):
     except:
         return 0.0
 
-def calculate_dynamic_floor_rate(comps):
-    default_rate = 0.005 
-    valid_data = comps[['Floor_Int', 'Unit Price ($ psf)']].dropna()
-    if len(valid_data) < 3 or valid_data['Floor_Int'].nunique() < 2: return default_rate
-    
-    x = valid_data['Floor_Int']
-    y = valid_data['Unit Price ($ psf)']
-    try:
-        slope, intercept = np.polyfit(x, y, 1)
-        avg_psf = y.mean()
-        if avg_psf == 0: return default_rate
-        return max(-0.002, min(0.015, slope / avg_psf))
-    except:
-        return default_rate
-
-def calculate_avm(df, target_blk, target_floor, target_stack, override_area=None, override_type=None):
-    market_annual_growth = calculate_market_trend(df)
-    last_tx_price, last_tx_date = 0, None
-    
-    # 1. Determine Unit Specs
-    if override_area is not None and override_type is not None:
-        est_area, target_type = override_area, override_type
-        # Try to find historical buy price even if overriding specs
-        _, _, _, hist_price, hist_date = get_unit_specs(df, target_blk, target_floor, target_stack)
-        if hist_price > 0: last_tx_price, last_tx_date = hist_price, hist_date
-            
-        base_info_source = df[df['BLK'] == target_blk]
-        if base_info_source.empty: base_info_source = df
-        info_tenure = base_info_source['Tenure'].mode()[0] if not base_info_source['Tenure'].empty else '-'
-        info_from = base_info_source['Tenure From'].mode()[0] if not base_info_source['Tenure From'].empty else '-'
-        info_subtype = base_info_source['Sub Type'].mode()[0] if not base_info_source['Sub Type'].empty else '-'
-    else:
-        est_area, target_type, _, last_tx_price, last_tx_date = get_unit_specs(df, target_blk, target_floor, target_stack)
-        rec_matches = df[(df['BLK']==target_blk) & (df['Stack']==target_stack)]
-        if not rec_matches.empty:
-            rec = rec_matches.iloc[0]
-            info_tenure = str(rec.get('Tenure', '-'))
-            info_from = str(rec.get('Tenure From', '-'))
-            info_subtype = str(rec.get('Sub Type', '-'))
+def detect_block_step(blk_df):
+    if blk_df.empty: return 1
+    unique_stacks = blk_df['Stack'].unique()
+    if len(unique_stacks) == 0: return 1
+    votes_simplex = 0
+    votes_maisonette = 0
+    for stack in unique_stacks:
+        stack_df = blk_df[blk_df['Stack'] == stack]
+        floors = sorted(stack_df['Floor_Num'].dropna().unique())
+        if len(floors) < 2: continue
+        has_odd = any(f % 2 != 0 for f in floors)
+        has_even = any(f % 2 == 0 for f in floors)
+        if (has_odd and not has_even) or (not has_odd and has_even):
+            votes_maisonette += 1
         else:
-            info_tenure, info_from, info_subtype = '-', '-', '-'
+            votes_simplex += 1
+    if votes_maisonette > votes_simplex: return 2
+    else: return 1
 
-    # 2. Find Comps
-    required_comps = 5
-    thresholds = [0.05, 0.10, 0.15, 0.20]
-    comps, used_threshold = pd.DataFrame(), 0.0
-
-    for t in thresholds:
-        min_area, max_area = est_area * (1 - t), est_area * (1 + t)
-        current_comps = df[(df['Area (sqft)'] >= min_area) & (df['Area (sqft)'] <= max_area)].copy()
-        if len(current_comps) >= required_comps:
-            comps, used_threshold = current_comps, t
-            break
-            
-    if comps.empty and 'current_comps' in locals():
-        comps, used_threshold = current_comps, 0.20
-    
-    if len(comps) < 2 and target_type != "N/A":
-        comps = df[df['Type'] == target_type].copy()
-        used_threshold = 9.99 
-
-    # 3. Filter Recent
-    limit_date = datetime.now() - pd.DateOffset(months=36)
-    recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
-    if recent_comps.empty:
-        limit_date = datetime.now() - pd.DateOffset(months=60)
-        recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
-
-    if recent_comps.empty:
-        return None, None, {}, pd.DataFrame(), 0, 0, 0, 0
-
-    # 4. Adjust Price
-    floor_adj_rate = calculate_dynamic_floor_rate(recent_comps)
-    recent_comps['Floor_Int'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
-    
-    def apply_adjustment(row):
-        floor_multiplier = 1 + (target_floor - row['Floor_Int']) * floor_adj_rate
-        years_ago = (datetime.now() - row['Sale Date']).days / 365.0
-        time_multiplier = 1 + (market_annual_growth * years_ago)
-        return row['Unit Price ($ psf)'] * floor_multiplier * time_multiplier
-
-    recent_comps['Adj_PSF'] = recent_comps.apply(apply_adjustment, axis=1)
-    recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
-    recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
-    
-    weighted_psf = (recent_comps['Adj_PSF'] * recent_comps['Weight']).sum() / recent_comps['Weight'].sum()
-    est_price = weighted_psf * est_area
-    
-    extra_info = {
-        'tenure': info_tenure,
-        'from': info_from,
-        'subtype': info_subtype,
-        'type': target_type,
-        'last_price': last_tx_price,
-        'last_date': last_tx_date
-    }
-    
-    return est_price, weighted_psf, extra_info, recent_comps, est_area, floor_adj_rate, market_annual_growth, used_threshold
-
-# ==========================================
-# 📄 PDF 生成模块 (调用 imported constants)
-# ==========================================
-
-def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price, est_psf, comps_df, mailing_address, recipient_name="Dear Homeowner", last_price=0, last_date=None):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=72)
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='RightAlign', alignment=TA_RIGHT))
-    styles.add(ParagraphStyle(name='Justify', alignment=TA_JUSTIFY, leading=14))
-    styles.add(ParagraphStyle(name='Signature', fontSize=10, leading=12))
-    
-    # 绿色居中样式用于 Capital Gain
-    styles.add(ParagraphStyle(
-        name='ProfitStyle', 
-        parent=styles['Normal'], 
-        alignment=TA_CENTER, 
-        fontSize=16, 
-        textColor=colors.green, 
-        spaceAfter=12,
-        spaceBefore=6
-    ))
-    
-    elements = []
-    
-    # 1. Header (使用 imported AGENT_PROFILE)
-    header_text = f"<b>{AGENT_PROFILE['agency']}</b><br/>{AGENT_PROFILE['name']} | {AGENT_PROFILE['title']}<br/>{AGENT_PROFILE['contact']} | {AGENT_PROFILE['email']}<br/>CEA Reg: {AGENT_PROFILE['license']}"
-    elements.append(Paragraph(header_text, styles['RightAlign']))
-    elements.append(Spacer(1, 40))
-    
-    # 2. Date & Address Block
-    date_str = datetime.now().strftime("%d %B %Y")
-    address_formatted = mailing_address.replace("\n", "<br/>")
-    
-    if recipient_name.lower().strip() not in ["dear homeowner", "homeowner"]:
-        clean_name = recipient_name.replace("Dear ", "").replace(",", "")
-        address_text = f"{date_str}<br/><br/><b>{clean_name}</b><br/>{address_formatted}"
+def get_stack_start_floor(stack_df, block_min_f, step):
+    if step == 1: return block_min_f
+    floors = sorted(stack_df['Floor_Num'].dropna().unique())
+    if not floors: return block_min_f
+    odd_count = sum(1 for f in floors if f % 2 != 0)
+    even_count = sum(1 for f in floors if f % 2 == 0)
+    if odd_count > even_count:
+        return block_min_f if block_min_f % 2 != 0 else block_min_f + 1
     else:
-        address_text = f"{date_str}<br/><br/><b>To The Homeowner</b><br/>{address_formatted}"
-    elements.append(Paragraph(address_text, styles['Normal']))
-    elements.append(Spacer(1, 20))
+        return block_min_f if block_min_f % 2 == 0 else block_min_f + 1
+
+def estimate_inventory(df, category_col='Category'):
+    if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: return {}
+    if 'Stack' not in df.columns:
+        inv_map = {}
+        for cat in df[category_col].unique():
+            inv_map[cat] = len(df[df[category_col] == cat])
+        return inv_map
+
+    df = df.dropna(subset=['Floor_Num']).copy()
+    final_totals = {cat: 0 for cat in df[category_col].unique()}
+    unique_blocks = df['BLK'].unique()
     
-    # 3. Salutation
-    salutation = recipient_name.strip()
-    if not salutation.endswith(","): salutation += ","
-    if not salutation.lower().startswith("dear"): salutation = f"Dear {salutation}"
-    elements.append(Paragraph(f"<b>{salutation}</b>", styles['Normal']))
-    elements.append(Spacer(1, 12))
-    
-    unit_display = format_unit(floor, stack) # 使用 imported format_unit
-    opening_text = f"I hope this letter finds you well. As a resident specialist in {project_name}, I have recently conducted a comprehensive valuation analysis for your unit at <b>BLK {blk} {unit_display}</b> ({int(area):,} sqft, {u_type})."
-    elements.append(Paragraph(opening_text, styles['Justify']))
-    elements.append(Spacer(1, 12))
-    
-    # 4. Valuation Body
-    est_price_m = est_price / 1e6
-    low_m, high_m = est_price_m * 0.9, est_price_m * 1.1
-    low_psf, high_psf = est_psf * 0.9, est_psf * 1.1
-    
-    val_text = """Based on the latest transaction data and adjusting for your specific floor level and unit attributes, the estimated market value of your property is:"""
-    elements.append(Paragraph(val_text, styles['Justify']))
-    elements.append(Spacer(1, 10))
-    
-    highlight_style_main = ParagraphStyle('HM', parent=styles['Normal'], alignment=TA_CENTER, fontSize=16, textColor=colors.darkblue, spaceAfter=6)
-    highlight_style_sub = ParagraphStyle('HS', parent=styles['Normal'], alignment=TA_CENTER, fontSize=10, textColor=colors.grey, spaceAfter=20)
-    
-    elements.append(Paragraph(f"<b>${est_price_m:.2f} Million (${est_psf:,.0f} psf)</b>", highlight_style_main))
-    range_txt = f"Valuation Range: ${low_m:.2f}M - ${high_m:.2f}M (${low_psf:,.0f} - ${high_psf:,.0f} psf)"
-    elements.append(Paragraph(range_txt, highlight_style_sub))
-    
-    # 5. Profit Analysis (Centered)
-    if last_price > 0 and last_date is not None:
-        profit = est_price - last_price
-        profit_pct = (profit / last_price) * 100
-        years_held = (datetime.now() - last_date).days / 365.0
-        buy_date_str = last_date.strftime('%d %b %Y')
+    for blk in unique_blocks:
+        blk_df = df[df['BLK'] == blk]
+        step = detect_block_step(blk_df)
+        min_f = int(blk_df['Floor_Num'].min())
+        max_f = int(blk_df['Floor_Num'].max())
+        if min_f < 1: min_f = 1
         
-        intro_text = f"Records indicate this unit was last purchased on <b>{buy_date_str}</b> for <b>${last_price/1e6:.2f}M</b>. Based on our current valuation, your estimated gross capital appreciation is:"
-        elements.append(Paragraph(intro_text, styles['Justify']))
+        unique_stacks = blk_df['Stack'].unique()
+        for stack in unique_stacks:
+            stack_df = blk_df[blk_df['Stack'] == stack]
+            if not stack_df.empty:
+                dominant_cat = stack_df[category_col].mode()[0]
+                start_f = get_stack_start_floor(stack_df, min_f, step)
+                theoretical_floors = range(start_f, max_f + 1, step)
+                count_per_stack = len(theoretical_floors)
+                final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + count_per_stack
+
+    observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
+    for cat in final_totals:
+        if final_totals[cat] < observed_counts.get(cat, 0):
+            final_totals[cat] = observed_counts.get(cat, 0)
+            
+    return final_totals
+
+def get_dynamic_floor_premium(df, category):
+    cat_df = df[df['Category'] == category].copy()
+    if cat_df.empty: return 0.005
+    recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
+    recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
+    grouped = recent_df.groupby(['BLK', 'Stack'])
+    rates = []
+    for _, group in grouped:
+        if len(group) < 2: continue
+        recs = group.to_dict('records')
+        for i in range(len(recs)):
+            for j in range(i + 1, len(recs)):
+                r1, r2 = recs[i], recs[j]
+                if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
+                floor_diff = r1['Floor_Num'] - r2['Floor_Num']
+                if floor_diff == 0: continue
+                if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
+                else: high, low, f_delta = r2, r1, -floor_diff
+                rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
+                if -0.005 < rate < 0.03: rates.append(rate)
+    if len(rates) >= 3:
+        fitted_rate = float(np.median(rates))
+        return max(0.001, min(0.015, fitted_rate))
+    else:
+        return 0.005
+
+def calculate_ssd_status(purchase_date):
+    now, p_dt = datetime.now(), pd.to_datetime(purchase_date)
+    held_years = (now - p_dt).days / 365.25
+    rate, emoji, text = 0.0, "🟢", "SSD Free"
+    if p_dt >= datetime(2025, 7, 4):
+        if held_years < 1: rate, emoji, text = 0.16, "🔴", "SSD 16%"
+        elif held_years < 2: rate, emoji, text = 0.12, "🔴", "SSD 12%"
+        elif held_years < 3: rate, emoji, text = 0.08, "🔴", "SSD 8%"
+        elif held_years < 4: rate, emoji, text = 0.04, "🔴", "SSD 4%"
+    elif p_dt >= datetime(2017, 3, 11):
+        if held_years < 1: rate, emoji, text = 0.12, "🔴", "SSD 12%"
+        elif held_years < 2: rate, emoji, text = 0.08, "🔴", "SSD 8%"
+        elif held_years < 3: rate, emoji, text = 0.04, "🔴", "SSD 4%"
+    return rate, emoji, text
+
+# ==================== 5. 共享图表组件 ====================
+
+def render_gauge(est_psf, font_size=12):
+    range_min = est_psf * 0.90
+    range_max = est_psf * 1.10
+    axis_min = est_psf * 0.80
+    axis_max = est_psf * 1.20
         
-        profit_val_text = f"<b>+${profit/1e6:.2f} Million ({profit_pct:.1f}%)</b>"
-        elements.append(Paragraph(profit_val_text, styles['ProfitStyle']))
-        
-        outro_text = f"This represents a significant return over the past {years_held:.1f} years."
-        elements.append(Paragraph(outro_text, styles['Justify']))
-        elements.append(Spacer(1, 12))
-    
-    # 6. Comps Table
-    elements.append(Paragraph("<b>Recent Comparable Transactions Used:</b>", styles['Normal']))
-    elements.append(Spacer(1, 6))
-    
-    data = [['Date', 'Unit', 'Area', 'Price', 'PSF']]
-    display_comps = comps_df.sort_values('Weight', ascending=False).head(5)
-    for _, row in display_comps.iterrows():
-        c_unit_masked = f"BLK {row['BLK']} {format_unit_masked(row['Floor'])}" # imported
-        c_date = row['Sale Date'].strftime('%d %b %Y')
-        c_price = f"${row['Sale Price']/1e6:.2f}M"
-        c_psf = f"${row['Unit Price ($ psf)']:,.0f}"
-        data.append([c_date, c_unit_masked, f"{int(row['Area (sqft)']):,}", c_price, c_psf])
-        
-    t = Table(data, colWidths=[1.2*inch, 1.5*inch, 0.8*inch, 1.0*inch, 0.8*inch])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.Color(0.2, 0.2, 0.6)),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTSIZE', (0,0), (-1,-1), 8),
-        ('BOTTOMPADDING', (0,0), (-1,0), 6),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-    ]))
-    elements.append(t)
-    elements.append(Spacer(1, 20))
-    
-    closing_text = f"The property market in {project_name} is dynamic. If you are considering restructuring your property portfolio or simply wish to cash out on these profits, I would be happy to share a more detailed marketing plan with you.<br/><br/>Please feel free to contact me at <b>{AGENT_PROFILE['contact']}</b>."
-    elements.append(Paragraph(closing_text, styles['Justify']))
-    elements.append(Spacer(1, 30))
-    
-    sign_text = f"Sincerely,<br/><br/><b>{AGENT_PROFILE['name']}</b><br/>{AGENT_PROFILE['title']}<br/>{AGENT_PROFILE['agency']}"
-    elements.append(Paragraph(sign_text, styles['Signature']))
-    elements.append(Spacer(1, 40))
-    
-    # 使用 imported CUSTOM_DISCLAIMER
-    disclaimer_clean = CUSTOM_DISCLAIMER.replace("**", "").replace("\n", "<br/>")
-    elements.append(Paragraph(f"<font size='7' color='grey'>{disclaimer_clean}</font>", styles['Justify']))
-    
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
-
-# ==========================================
-# 🖥️ MAIN RENDER FUNCTION
-# ==========================================
-
-def render(df_raw, project_name="Project", chart_font_size=12):
-    st.subheader("🤖 智能估值 (AVM)")
-
-    target = st.session_state.get('avm_target', None)
-    if not target:
-        st.info("👈 请先在 **楼宇透视 (Tab 2)** 点击任意单位，即可在此查看估值详情。")
-        return
-
-    blk, floor, stack = target['blk'], target['floor'], target['stack']
-    df = clean_and_prepare_data(df_raw)
-    
-    sys_area, sys_type, _, _, _ = get_unit_specs(df, blk, floor, stack)
-    all_types = sorted(df['Type'].unique().tolist())
-    if sys_type not in all_types: all_types.insert(0, sys_type)
-    
-    input_area = int(sys_area) if pd.notna(sys_area) else 0
-    input_type = sys_type if sys_type in all_types else (all_types[0] if all_types else "N/A")
-
-    widget_key_suffix = f"{blk}_{floor}_{stack}"
-    with st.expander("⚙️ 调整参数 (Calibration)", expanded=True):
-        c_cal1, c_cal2 = st.columns(2)
-        with c_cal1:
-            input_area = st.number_input("面积 (sqft)", value=input_area, step=10, key=f"cal_area_{widget_key_suffix}")
-        with c_cal2:
-            input_type = st.selectbox("户型 (Type)", options=all_types, index=all_types.index(input_type) if input_type in all_types else 0, key=f"cal_type_{widget_key_suffix}")
-    
-    est_price, est_psf, extra_info, comps, area, floor_adj, market_growth, used_threshold = calculate_avm(
-        df, blk, floor, stack, override_area=input_area, override_type=input_type
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = est_psf,
+        number = {'suffix': " psf", 'font': {'size': 18}}, 
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        gauge = {
+            'axis': {
+                'range': [axis_min, axis_max], 
+                'tickwidth': 1, 
+                'tickcolor': "darkblue",
+                'tickmode': 'array',
+                'tickvals': [axis_min, est_psf, axis_max],
+                'ticktext': [f"{int(axis_min)}", f"{int(est_psf)}", f"{int(axis_max)}"]
+            },
+            'bar': {'thickness': 0}, 
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "#e5e7eb",
+            'steps': [
+                {'range': [axis_min, range_min], 'color': "#f3f4f6"},
+                {'range': [range_min, range_max], 'color': "#2563eb"},
+                {'range': [range_max, axis_max], 'color': "#f3f4f6"}
+            ],
+            'threshold': {
+                'line': {'color': "#dc2626", 'width': 3},
+                'thickness': 0.8,
+                'value': est_psf
+            }
+        }
+    ))
+    fig.update_layout(
+        height=150, 
+        margin=dict(l=20, r=20, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        font={'family': "Arial", 'size': 11}
     )
-    
-    if est_price is None:
-        st.error(f"⚠️ 数据严重不足，无法估值。")
-        return
-
-    formatted_unit_str = format_unit(floor, stack) # imported
-    info_parts = [f"{int(area):,} sqft"]
-    if extra_info['type'] != 'N/A': info_parts.append(str(extra_info['type'])) 
-    if extra_info['tenure'] != '-' and extra_info['tenure'] != 'N/A': info_parts.append(str(extra_info['tenure']))
-    info_str = " | ".join(info_parts)
-    
-    st.markdown(f"""
-    <div style="background-color:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:20px;">
-        <p style="margin:0 0 5px 0; color:#64748b; font-size:12px; font-weight:bold; letter-spacing:1px; text-transform:uppercase;">{project_name}</p>
-        <h3 style="margin:0; color:#1e293b; font-size:24px;">BLK {blk} {formatted_unit_str}</h3>
-        <p style="margin:5px 0 0 0; color:#475569; font-size:15px; font-weight:500;">{info_str}</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    c1, c2 = st.columns([1, 1.5])
-    low_bound = est_price * 0.90
-    high_bound = est_price * 1.10
-    
-    with c1:
-        st.metric(label="预估总价 (Est. Price)", value=f"${est_price/1e6:,.2f}M")
-        last_price = extra_info.get('last_price', 0)
-        if last_price > 0:
-            profit = est_price - last_price
-            profit_pct = (profit / last_price) * 100
-            st.markdown(f"<div style='margin-top:5px; margin-bottom:10px; font-size:14px; color:#15803d; font-weight:bold;'>📈 预计增值: +${profit/1e6:.2f}M ({profit_pct:.1f}%)</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;'><strong>合理区间 (+/- 10%):</strong><br>${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M</div>", unsafe_allow_html=True)
-
-    with c2:
-        # 使用 imported render_gauge
-        st.plotly_chart(render_gauge(est_psf, chart_font_size), use_container_width=True, key=f"gauge_{blk}_{floor}_{stack}_{time.time()}")
-
-    st.divider()
-
-    st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
-    comps_display = comps.sort_values('Weight', ascending=False).head(5).copy()
-    comps_display['Sale Date'] = comps_display['Sale Date'].dt.strftime('%Y-%m-%d')
-    comps_display['Sale Price'] = comps_display['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
-    comps_display['Unit Price ($ psf)'] = comps_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
-    comps_display['Unit'] = comps_display.apply(lambda row: f"BLK {row['BLK']} {format_unit(row['Floor'], row['Stack'])}", axis=1) # imported
-    
-    st.dataframe(comps_display[['Sale Date', 'Unit', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']], use_container_width=True, hide_index=True)
-
-    st.divider()
-    
-    st.markdown("### 📄 报告生成 (Report Generation)")
-    default_address_str = get_address_template(project_name, blk, formatted_unit_str)
-    
-    col_name, col_addr, col_map = st.columns([1.5, 3, 1])
-    with col_name:
-        recipient_name = st.text_input("👤 收件人称呼 (Recipient)", value="Dear Homeowner", help="如 'Dear Mr. Tan'", key=f"name_{widget_key_suffix}")
-    with col_addr:
-        mailing_address = st.text_area("📍 确认收件地址 (Mailing Address)", value=default_address_str, height=100, key=f"addr_{widget_key_suffix}")
-    with col_map:
-        st.write(""); st.write(""); st.write("")
-        query_str = urllib.parse.quote(f"{project_name} Block {blk}")
-        st.link_button("🗺️ 核对邮编", f"https://www.google.com/maps/search/?api=1&query={query_str}")
-
-    pdf_bytes = generate_pdf_letter(
-        project_name, blk, floor, stack, 
-        area, extra_info['type'], 
-        est_price, est_psf, comps,
-        mailing_address=mailing_address, 
-        recipient_name=recipient_name, 
-        last_price=extra_info.get('last_price', 0),
-        last_date=extra_info.get('last_date', None)
-    )
-    
-    st.download_button(
-        label="📥 下载致业主信函 (Download Letter to Owner)",
-        data=pdf_bytes,
-        file_name=f"Letter_{blk}_{formatted_unit_str}.pdf",
-        mime="application/pdf",
-        type="primary",
-        use_container_width=True,
-        key=f"dl_pdf_{blk}_{floor}_{stack}_{time.time()}"
-    )
+    return fig
