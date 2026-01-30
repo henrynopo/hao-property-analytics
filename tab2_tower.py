@@ -18,8 +18,8 @@ def go_to_valuation(blk, floor, stack):
     st.session_state['trigger_tab_switch'] = True
 
 def select_block(blk):
-    """点击楼座切换 (修复颜色不保持问题)"""
-    st.session_state.selected_blk = blk
+    """点击楼座切换 (强制转为字符串存储，防止类型不匹配)"""
+    st.session_state.selected_blk = str(blk)
 
 # --- 1. 数据清洗与辅助 ---
 def clean_data(df_raw):
@@ -33,6 +33,9 @@ def clean_data(df_raw):
     df.rename(columns=rename_map, inplace=True)
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
+    
+    # [V181] 强制 BLK 列为字符串，防止混合类型导致选中状态失效
+    df['BLK'] = df['BLK'].astype(str)
     return df
 
 def calculate_ssd_info(purchase_date):
@@ -45,22 +48,22 @@ def calculate_ssd_info(purchase_date):
     lock_years = 4 if purchase_date >= POLICY_2025 else 3
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
     
-    # 计算剩余月数
+    # 1. 已解禁
     if today >= ssd_deadline:
         return "🟩", "无SSD", 0
     
-    # 计算剩余月数 (向上取整)
+    # 2. 计算剩余月数
     delta = relativedelta(ssd_deadline, today)
     months_left = delta.years * 12 + delta.months
-    if delta.days > 0: months_left += 1 # 不足一个月按一个月算
+    if delta.days > 0: months_left += 1 
 
-    # 计算税率
+    # 3. 计算税率
     years_held = relativedelta(today, purchase_date).years + 1
     rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
     rate_str = rates.get(years_held, "4%")
     rate_val = int(rate_str.strip('%'))
 
-    # 图标逻辑
+    # 4. 图标逻辑
     days_left = (ssd_deadline - today).days
     
     if days_left < 90: icon = "🟨"
@@ -86,11 +89,12 @@ def render(df_raw, chart_font_size=12):
     df = clean_data(df_raw)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
-    # 状态初始化 (确保 selected_blk 始终有效)
+    # [V181] 状态初始化 (更加健壮)
+    # 确保 session_state 里的值一定在当前的 blk 列表里，否则重置
     if 'selected_blk' not in st.session_state:
-        st.session_state.selected_blk = all_blks[0]
-    elif st.session_state.selected_blk not in all_blks:
-        st.session_state.selected_blk = all_blks[0]
+        st.session_state.selected_blk = str(all_blks[0])
+    elif str(st.session_state.selected_blk) not in all_blks:
+        st.session_state.selected_blk = str(all_blks[0])
 
     # 跳转逻辑
     if st.session_state.get('trigger_tab_switch', False):
@@ -133,11 +137,16 @@ def render(df_raw, chart_font_size=12):
             transform: translateY(-1px);
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
+        /* 选中状态的按钮样式增强 */
+        div.stButton > button:focus:not(:active) {
+            border-color: #ff4b4b !important;
+            color: #ff4b4b !important;
+        }
         [data-testid="column"] { padding: 0 2px !important; }
         </style>
     """, unsafe_allow_html=True)
 
-    # Block Selector (使用 callback 修复颜色问题)
+    # --- Block Selector (V181 修复版) ---
     st.write("选择楼座 (Block):")
     cols_per_row = 8
     rows = [all_blks[i:i + cols_per_row] for i in range(0, len(all_blks), cols_per_row)]
@@ -146,10 +155,15 @@ def render(df_raw, chart_font_size=12):
         cols = st.columns(len(row_blks))
         for idx, blk in enumerate(row_blks):
             with cols[idx]:
-                b_type = "primary" if st.session_state.selected_blk == blk else "secondary"
-                # 关键修改: 使用 on_click=select_block
+                # 强制转换为字符串比较
+                is_selected = str(st.session_state.selected_blk) == str(blk)
+                
+                # 视觉双重锁定：1. 颜色 2. 图标
+                b_type = "primary" if is_selected else "secondary"
+                label_text = f"🔴 {blk}" if is_selected else blk
+                
                 st.button(
-                    blk, 
+                    label_text, 
                     key=f"blk_{blk}", 
                     type=b_type, 
                     use_container_width=True,
@@ -157,7 +171,7 @@ def render(df_raw, chart_font_size=12):
                     args=(blk,)
                 )
 
-    # Grid Render
+    # --- Grid Render ---
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     
