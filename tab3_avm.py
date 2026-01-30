@@ -178,8 +178,6 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     
     # 2. Date & Mailing Address (User Editable)
     date_str = datetime.now().strftime("%d %B %Y")
-    
-    # Convert newlines in address to <br/>
     address_formatted = mailing_address.replace("\n", "<br/>")
     
     address_text = f"""
@@ -203,7 +201,7 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     elements.append(Paragraph(opening_text, styles['Justify']))
     elements.append(Spacer(1, 12))
     
-    # 4. Valuation Result (Revised Structure)
+    # 4. Valuation Result
     est_price_m = est_price / 1e6
     low_m = est_price_m * 0.9
     high_m = est_price_m * 1.1
@@ -217,7 +215,7 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     elements.append(Paragraph(val_text, styles['Justify']))
     elements.append(Spacer(1, 10))
     
-    # Highlight Styles
+    # Highlight
     highlight_style_main = ParagraphStyle(
         'HighlightMain', parent=styles['Normal'], 
         alignment=TA_CENTER, fontSize=16, textColor=colors.darkblue, spaceAfter=6
@@ -227,9 +225,7 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
         alignment=TA_CENTER, fontSize=10, textColor=colors.grey, spaceAfter=20
     )
     
-    # Line 1: Exact Value
     elements.append(Paragraph(f"<b>${est_price_m:.2f} Million (${est_psf:,.0f} psf)</b>", highlight_style_main))
-    # Line 2: Range
     range_txt = f"Valuation Range: ${low_m:.2f}M - ${high_m:.2f}M (${low_psf:,.0f} - ${high_psf:,.0f} psf)"
     elements.append(Paragraph(range_txt, highlight_style_sub))
     
@@ -250,7 +246,7 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
         elements.append(Paragraph(profit_text, styles['Justify']))
         elements.append(Spacer(1, 12))
     
-    # 6. Supporting Data (Comparables - MASKED)
+    # 6. Supporting Data (Masked)
     elements.append(Paragraph("<b>Recent Comparable Transactions Used:</b>", styles['Normal']))
     elements.append(Spacer(1, 6))
     
@@ -258,13 +254,10 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     display_comps = comps_df.sort_values('Weight', ascending=False).head(5)
     
     for _, row in display_comps.iterrows():
-        # Mask Stack Number
         c_unit_masked = f"BLK {row['BLK']} {format_unit_masked(row['Floor'])}"
-        
         c_date = row['Sale Date'].strftime('%Y-%m-%d')
         c_price = f"${row['Sale Price']/1e6:.2f}M"
         c_psf = f"${row['Unit Price ($ psf)']:,.0f}"
-        
         data.append([c_date, c_unit_masked, f"{int(row['Area (sqft)']):,}", c_price, c_psf])
         
     t = Table(data, colWidths=[1.2*inch, 1.5*inch, 0.8*inch, 1.0*inch, 0.8*inch])
@@ -307,151 +300,6 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     doc.build(elements)
     buffer.seek(0)
     return buffer
-
-# ==========================================
-# 🧠 CORE LOGIC (AVM Calculation)
-# ==========================================
-
-def calculate_avm(df, target_blk, target_floor, target_stack, override_area=None, override_type=None):
-    market_annual_growth = calculate_market_trend(df)
-
-    # 1. Determine Specs
-    last_tx_price = 0
-    last_tx_date = None
-    
-    if override_area is not None and override_type is not None:
-        est_area = override_area
-        target_type = override_type
-        # Try to find historical buy price
-        _, _, _, hist_price, hist_date = get_unit_specs(df, target_blk, target_floor, target_stack)
-        if hist_price > 0: 
-            last_tx_price = hist_price
-            last_tx_date = hist_date
-            
-        base_info_source = df[df['BLK'] == target_blk]
-        if base_info_source.empty: base_info_source = df
-        info_tenure = base_info_source['Tenure'].mode()[0] if not base_info_source['Tenure'].empty else '-'
-        info_from = base_info_source['Tenure From'].mode()[0] if not base_info_source['Tenure From'].empty else '-'
-        info_subtype = base_info_source['Sub Type'].mode()[0] if not base_info_source['Sub Type'].empty else '-'
-    else:
-        est_area, target_type, _, last_tx_price, last_tx_date = get_unit_specs(df, target_blk, target_floor, target_stack)
-        
-        rec_matches = df[(df['BLK']==target_blk) & (df['Stack']==target_stack)]
-        if not rec_matches.empty:
-            rec = rec_matches.iloc[0]
-            info_tenure = str(rec.get('Tenure', '-'))
-            info_from = str(rec.get('Tenure From', '-'))
-            info_subtype = str(rec.get('Sub Type', '-'))
-        else:
-            info_tenure, info_from, info_subtype = '-', '-', '-'
-
-    # 2. Filter Comps
-    required_comps = 5
-    thresholds = [0.05, 0.10, 0.15, 0.20]
-    comps = pd.DataFrame()
-    used_threshold = 0.0
-
-    for t in thresholds:
-        min_area = est_area * (1 - t)
-        max_area = est_area * (1 + t)
-        current_comps = df[(df['Area (sqft)'] >= min_area) & (df['Area (sqft)'] <= max_area)].copy()
-        if len(current_comps) >= required_comps:
-            comps = current_comps
-            used_threshold = t
-            break
-            
-    if comps.empty and 'current_comps' in locals():
-        comps = current_comps
-        used_threshold = 0.20
-    
-    if len(comps) < 2 and target_type != "N/A":
-        comps = df[df['Type'] == target_type].copy()
-        used_threshold = 9.99 
-
-    # 3. Time Filter
-    limit_date = datetime.now() - pd.DateOffset(months=36)
-    recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
-    
-    if recent_comps.empty:
-        limit_date = datetime.now() - pd.DateOffset(months=60)
-        recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
-
-    if recent_comps.empty:
-        return None, None, {}, pd.DataFrame(), 0, 0, 0, 0, 0, 0
-
-    # 4. Calculate Adjustment
-    floor_adj_rate = calculate_dynamic_floor_rate(recent_comps)
-    recent_comps['Floor_Int'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
-    
-    def apply_adjustment(row):
-        floor_multiplier = 1 + (target_floor - row['Floor_Int']) * floor_adj_rate
-        years_ago = (datetime.now() - row['Sale Date']).days / 365.0
-        time_multiplier = 1 + (market_annual_growth * years_ago)
-        return row['Unit Price ($ psf)'] * floor_multiplier * time_multiplier
-
-    recent_comps['Adj_PSF'] = recent_comps.apply(apply_adjustment, axis=1)
-    recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
-    recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
-    
-    weighted_psf = (recent_comps['Adj_PSF'] * recent_comps['Weight']).sum() / recent_comps['Weight'].sum()
-    est_psf = weighted_psf
-    est_price = est_psf * est_area
-    
-    extra_info = {
-        'tenure': info_tenure,
-        'from': info_from,
-        'subtype': info_subtype,
-        'type': target_type,
-        'last_price': last_tx_price,
-        'last_date': last_tx_date
-    }
-    
-    return est_price, est_psf, extra_info, recent_comps, est_area, floor_adj_rate, market_annual_growth, used_threshold
-
-# --- 渲染仪表盘 ---
-def render_gauge(est_psf, font_size=12):
-    range_min = est_psf * 0.90
-    range_max = est_psf * 1.10
-    axis_min = est_psf * 0.80
-    axis_max = est_psf * 1.20
-        
-    fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = est_psf,
-        number = {'suffix': " psf", 'font': {'size': 18}}, 
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        gauge = {
-            'axis': {
-                'range': [axis_min, axis_max], 
-                'tickwidth': 1, 
-                'tickcolor': "darkblue",
-                'tickmode': 'array',
-                'tickvals': [axis_min, est_psf, axis_max],
-                'ticktext': [f"{int(axis_min)}", f"{int(est_psf)}", f"{int(axis_max)}"]
-            },
-            'bar': {'thickness': 0}, 
-            'bgcolor': "white",
-            'borderwidth': 2,
-            'bordercolor': "#e5e7eb",
-            'steps': [
-                {'range': [axis_min, range_min], 'color': "#f3f4f6"},
-                {'range': [range_min, range_max], 'color': "#2563eb"},
-                {'range': [range_max, axis_max], 'color': "#f3f4f6"}
-            ],
-            'threshold': {
-                'line': {'color': "#dc2626", 'width': 3},
-                'thickness': 0.8,
-                'value': est_psf
-            }
-        }
-    ))
-    fig.update_layout(
-        height=150, 
-        margin=dict(l=20, r=20, t=10, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        font={'family': "Arial", 'size': 11}
-    )
-    return fig
 
 # ==========================================
 # 🖥️ MAIN RENDER FUNCTION
@@ -555,11 +403,11 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     st.divider()
     
-    # 5. [V188 Feature] Address Verification & PDF Download
+    # 5. Report Generation & Address Check
     st.markdown("### 📄 报告生成 (Report Generation)")
     
-    # A. Address Input with Google Map Link
-    default_address = f"Block {blk} Braddell Hill, {formatted_unit_str}\nBraddell View\nSingapore"
+    # [V189] Smart Address Template with Project Name
+    default_address = f"Block {blk} {project_name}\n{formatted_unit_str}\nSingapore"
     
     col_addr, col_map = st.columns([3, 1])
     with col_addr:
@@ -570,19 +418,19 @@ def render(df_raw, project_name="Project", chart_font_size=12):
             key=f"addr_{widget_key_suffix}"
         )
     with col_map:
-        st.write("") # Spacer
         st.write("") 
-        # Generate Google Map Query
+        st.write("") 
+        # Deep link to Google Maps
         query_str = urllib.parse.quote(f"{project_name} Block {blk}")
         map_url = f"https://www.google.com/maps/search/?api=1&query={query_str}"
-        st.link_button("🗺️ 在 Google Map 中核对", map_url)
+        st.link_button("🗺️ 核对邮编", map_url) # Shortened label
 
-    # B. Generate PDF with confirmed address
+    # Generate PDF
     pdf_bytes = generate_pdf_letter(
         project_name, blk, floor, stack, 
         area, extra_info['type'], 
         est_price, est_psf, comps,
-        mailing_address=mailing_address, # Pass user edited address
+        mailing_address=mailing_address, 
         last_price=extra_info.get('last_price', 0),
         last_date=extra_info.get('last_date', None)
     )
