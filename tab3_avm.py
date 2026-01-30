@@ -1,176 +1,226 @@
-# 文件名: tab3_avm.py
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-import re
-from utils import calculate_avm, calculate_ssd_status
-from pdf_gen import generate_pdf_report, PDF_AVAILABLE
+from datetime import datetime
 
-# --- UI组件 ---
-def kpi_card(label, value, sub_value=None, color="default"):
-    color_map = {
-        "default": "#111827",
-        "green": "#059669",
-        "red": "#dc2626",
-        "blue": "#2563eb"
-    }
-    text_color = color_map.get(color, "#111827")
-    sub_html = f'<div style="font-size: 12px; color: #6b7280; margin-top: 2px;">{sub_value}</div>' if sub_value else ""
-    return f"""
-    <div style="
-        background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px;
-        text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center;
-    ">
-        <div style="font-size: 13px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">{label}</div>
-        <div style="font-size: 18px; font-weight: 700; color: {text_color}; line-height: 1.2;">{value}</div>
-        {sub_html}
+# --- 核心估值逻辑 ---
+def calculate_avm(df, target_blk, target_floor, target_stack):
+    # 1. 基础过滤
+    df['Sale Date'] = pd.to_datetime(df['Sale Date'])
+    
+    # 2. 寻找同类户型 (Maisonette vs Typical)
+    # 简单逻辑：如果是 10J-10M，算 Maisonette；其他算 Typical
+    maisonette_blks = ['10J', '10K', '10L', '10M']
+    is_maisonette = target_blk in maisonette_blks
+    
+    if is_maisonette:
+        comps = df[df['BLK'].isin(maisonette_blks)].copy()
+        type_tag = "Maisonette (复式)"
+    else:
+        # 排除掉 Maisonette 的就是 Typical
+        comps = df[~df['BLK'].isin(maisonette_blks)].copy()
+        type_tag = "Apartment (平层)"
+    
+    # 3. 时间权重 (越近越重要)
+    # 仅取最近 18 个月的数据，保证时效性
+    limit_date = datetime.now() - pd.DateOffset(months=18)
+    recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
+    
+    if recent_comps.empty:
+        # 如果最近无交易，放宽到 36 个月
+        limit_date = datetime.now() - pd.DateOffset(months=36)
+        recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
+    
+    if recent_comps.empty:
+        return None, None, type_tag, pd.DataFrame()
+
+    # 4. 楼层调整 (Floor Adjustment)
+    # 假设每高一层，PSF +0.5% (保守估计)
+    # 基准楼层设为最近交易的平均楼层
+    recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
+    avg_floor = recent_comps['Floor_Num'].mean()
+    
+    # 计算调整后的 PSF
+    # Formula: Adj_PSF = Raw_PSF * (1 + (Target_Floor - Comp_Floor) * 0.005)
+    recent_comps['Adj_PSF'] = recent_comps.apply(
+        lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
+        axis=1
+    )
+    
+    # 5. 加权平均 (时间衰减)
+    # 权重 = 1 / (天数差 + 30)
+    recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
+    recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
+    
+    weighted_psf = (recent_comps['Adj_PSF'] * recent_comps['Weight']).sum() / recent_comps['Weight'].sum()
+    
+    # 估值结果
+    est_psf = weighted_psf
+    
+    # 寻找本单位面积 (尝试从历史记录找，找不到就用同类平均)
+    # 精确匹配 Block + Stack
+    this_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
+    if not this_stack_tx.empty:
+        est_area = this_stack_tx.iloc[0]['Area (sqft)']
+    else:
+        est_area = recent_comps['Area (sqft)'].median()
+        
+    est_price = est_psf * est_area
+    
+    return est_price, est_psf, type_tag, recent_comps, est_area
+
+# --- 渲染仪表盘 ---
+def render_gauge(est_psf, min_psf, max_psf):
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = est_psf,
+        number = {'suffix': " psf", 'font': {'size': 24}}, # 字体改小一点防止遮挡
+        domain = {'x': [0, 1], 'y': [0, 1]},
+        title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': 14, 'color': "gray"}},
+        gauge = {
+            'axis': {'range': [min_psf*0.9, max_psf*1.1], 'tickwidth': 1, 'tickcolor': "darkblue"},
+            'bar': {'color': "#2563eb"},
+            'bgcolor': "white",
+            'borderwidth': 2,
+            'bordercolor': "gray",
+            'steps': [
+                {'range': [min_psf, max_psf], 'color': "#e0f2fe"}, # 浅蓝区间
+                {'range': [min_psf*0.9, min_psf], 'color': "#fef2f2"}, # 低于区间(红)
+                {'range': [max_psf, max_psf*1.1], 'color': "#fef2f2"}  # 高于区间(红)
+            ],
+            'threshold': {
+                'line': {'color': "red", 'width': 4},
+                'thickness': 0.75,
+                'value': est_psf
+            }
+        }
+    ))
+    # 修复遮挡：增加 Margin，尤其是底部
+    fig.update_layout(
+        height=250, 
+        margin=dict(l=30, r=30, t=50, b=50),
+        paper_bgcolor="rgba(0,0,0,0)",
+        font={'family': "Arial"}
+    )
+    return fig
+
+# --- 主渲染函数 ---
+def render(df):
+    st.subheader("🤖 智能估值 (AVM)")
+
+    # 1. 接收参数
+    target = st.session_state.get('avm_target', None)
+    
+    if not target:
+        st.info("👈 请先在 **楼宇透视 (Tab 2)** 点击任意单位，即可在此查看估值详情。")
+        return
+
+    blk, floor, stack = target['blk'], target['floor'], target['stack']
+    
+    # 2. 计算估值
+    est_price, est_psf, type_tag, comps, area = calculate_avm(df, blk, floor, stack)
+    
+    if est_price is None:
+        st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
+        return
+
+    # 3. 顶部概览卡片
+    st.markdown(f"""
+    <div style="background-color:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:20px;">
+        <h3 style="margin:0; color:#1e293b;">{blk} #{int(floor):02d}-{stack}</h3>
+        <p style="margin:5px 0 0 0; color:#64748b; font-size:14px;">
+            {type_tag} | {int(area):,} sqft | 楼层: {floor}
+        </p>
     </div>
-    """
+    """, unsafe_allow_html=True)
 
-def natural_key(string_):
-    if not isinstance(string_, str): return [0]
-    return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', string_)]
-
-def render(df, project_name, chart_font_size):
-    st.subheader("💎 单元智能估值 (AVM)")
-
-    if 'avm_res' not in st.session_state: st.session_state.avm_res = None
-
-    # --- 1. 接收跳转信号 & 强制同步状态 ---
-    # 关键修复：Streamlit 的 widget key 优先级很高，必须在这里强制覆盖
-    auto_run = False
-    
-    # 定义 Widget Key (版本号 v108 防止缓存冲突)
-    KEY_BLK = "blk_v108"
-    KEY_FLR = "flr_v108"
-    KEY_STK = "stk_v108"
-
-    if 'avm_target' in st.session_state:
-        target = st.session_state['avm_target']
-        t_blk, t_flr, t_stk = target['blk'], target['floor'], target['stack']
-        
-        # 强制更新 Session State，让 Selectbox 听话
-        st.session_state[KEY_BLK] = t_blk
-        st.session_state[KEY_FLR] = t_flr
-        st.session_state[KEY_STK] = t_stk
-        
-        st.toast(f"📍 已定位至 {t_blk} #{t_flr}-{t_stk}", icon="🚀")
-        auto_run = True
-        
-        # 用完即焚，防止循环
-        del st.session_state['avm_target']
-
-    # --- 2. 渲染表单 ---
-    c1, c2, c3 = st.columns(3)
-    
-    # 准备 Block 列表
-    blks = sorted(df['BLK'].unique(), key=natural_key)
+    # 4. 估值核心展示 (列布局)
+    c1, c2 = st.columns([1, 1.5])
     
     with c1:
-        # 注意：这里不需要 index 参数，因为 key 已经在 session_state 里被我们强制改过了
-        # 如果 session_state 里没有 (第一次打开)，Streamlit 会默认选第一个
-        s_blk = st.selectbox("1. 楼座 (Block)", blks, key=KEY_BLK)
-    
-    # 准备 Floor 列表 (基于当前选中的 Block)
-    blk_df = df[df['BLK'] == s_blk]
-    if 'Floor_Num' in blk_df.columns:
-        floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int))
-    else:
-        floors = [1]
-    if not floors: floors = [1]
-    
+        st.metric(
+            label="预估总价 (Est. Price)",
+            value=f"${est_price/1e6:,.2f}M",
+            delta=None
+        )
+        st.caption(f"基于 {len(comps)} 笔近期参考交易")
+        
+        # 价格区间置信度 (简单模拟 +/- 5%)
+        low_bound = est_price * 0.95
+        high_bound = est_price * 1.05
+        st.markdown(f"""
+        <div style="margin-top:10px; padding:10px; background:#eff6ff; border-radius:4px; font-size:13px; color:#1e40af;">
+            <strong>合理区间:</strong><br>
+            ${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M
+        </div>
+        """, unsafe_allow_html=True)
+
     with c2:
-        # 防崩逻辑：如果自动填入的楼层不在当前 Block 的楼层列表中 (极少见)，重置
-        if KEY_FLR in st.session_state and st.session_state[KEY_FLR] not in floors:
-             st.session_state[KEY_FLR] = floors[len(floors)//2]
-             
-        s_flr = st.selectbox("2. 楼层 (Floor)", floors, key=KEY_FLR)
-        
-    # 准备 Stack 列表
-    stacks = sorted(blk_df[blk_df['Floor_Num']==s_flr]['Stack'].unique(), key=natural_key)
-    if not stacks: stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
-    if not stacks: stacks = ['Unknown']
-    
-    with c3:
-        # 防崩逻辑：同上
-        if KEY_STK in st.session_state and st.session_state[KEY_STK] not in stacks:
-            st.session_state[KEY_STK] = stacks[0]
-            
-        s_stk = st.selectbox("3. 单元 (Stack)", stacks, key=KEY_STK)
-
-    # --- 3. 触发计算 ---
-    # 无论是手动点击，还是自动跳转 (auto_run)，都执行
-    trigger = st.button("🚀 开始估值", type="primary", use_container_width=True)
-    
-    if trigger or auto_run:
-        area, psf, val, _, _, comps, _ = calculate_avm(df, s_blk, s_stk, s_flr)
-        
-        if area:
-            st.session_state.avm_res = {
-                'area':area, 'psf':psf, 'val':val, 
-                'blk':s_blk, 'stk':s_stk, 'flr':s_flr, 
-                'comps':comps
-            }
-        else:
-            st.error("❌ 数据不足，无法估值")
-            st.session_state.avm_res = None
-
-    # --- 4. 结果展示 ---
-    if st.session_state.avm_res:
-        res = st.session_state.avm_res
-        val = res['val']
-        
-        # 历史数据
-        hist = df[(df['BLK']==res['blk']) & (df['Stack']==res['stk']) & (df['Floor_Num']==res['flr'])].sort_values('Sale Date')
-        last_p, gain, ssd = 0, 0, 0
-        if not hist.empty:
-            last = hist.iloc[-1]
-            last_p = last['Sale Price']
-            ssd_rate, _, ssd_txt = calculate_ssd_status(last['Sale Date'])
-            ssd = val * ssd_rate
-            gain = val - last_p - ssd
-
-        st.markdown("---")
-        
-        # KPI Cards
-        k1, k2, k3 = st.columns(3)
-        val_color = "green" if gain > 0 else ("red" if gain < 0 else "default")
-        gain_str = f"{gain/1e6:+.2f}M Gain" if last_p else "无历史参考"
-        
-        with k1: st.markdown(kpi_card("预估总价", f"${val/1e6:.2f}M", gain_str, color=val_color), unsafe_allow_html=True)
-        with k2: st.markdown(kpi_card("预估尺价", f"${res['psf']:,.0f} psf", color="blue"), unsafe_allow_html=True)
-        with k3: st.markdown(kpi_card("单位面积", f"{int(res['area']):,} sqft", color="default"), unsafe_allow_html=True)
-
         # 仪表盘
-        fig = go.Figure(go.Indicator(
-            mode="number+gauge", value=val, number={'prefix':"$",'valueformat':",.0f"},
-            gauge={'axis':{'range':[val*0.85, val*1.15]}, 'bar':{'color':"#1f77b4"}, 
-                   'steps':[{'range':[val*0.85, val*0.95], 'color':"#f2f2f2"},{'range':[val*0.95, val*1.05], 'color':"#cbf3f0"},{'range':[val*1.05, val*1.15], 'color':"#f2f2f2"}]}
-        ))
-        fig.update_layout(height=120, margin=dict(t=20, b=20), font=dict(size=chart_font_size))
-        st.plotly_chart(fig, use_container_width=True)
+        min_p = comps['Unit Price ($ psf)'].min()
+        max_p = comps['Unit Price ($ psf)'].max()
+        st.plotly_chart(render_gauge(est_psf, min_p, max_p), use_container_width=True)
 
-        # 详情表格
-        st.subheader("📜 本单位历史")
-        if not hist.empty:
-            cols = [c for c in ['Sale Date','Sale Price','Sale PSF','Type of Sale'] if c in hist.columns]
-            st.dataframe(hist[cols].style.format({'Sale Price':"${:,.0f}",'Sale PSF':"${:,.0f}"}), use_container_width=True, hide_index=True)
-            if ssd > 0: st.warning(f"⚠️ 需付 SSD: {ssd_txt}")
-            else: st.success("✅ SSD Free")
-        else: st.info("无历史记录")
+    st.divider()
 
-        st.subheader("📉 周边参考")
-        ccols = [c for c in ['Sale Date','Unit','Sale Price','Sale PSF','Area (sqft)'] if c in res['comps'].columns]
-        st.dataframe(res['comps'][ccols].style.format({'Sale Price':"${:,.0f}",'Sale PSF':"${:,.0f}",'Area (sqft)':"{:,.0f}"}), use_container_width=True, hide_index=True)
+    # 5. 本单位历史 (按时间倒序)
+    st.markdown("#### 📜 本单位历史 (Unit History)")
+    this_unit_hist = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (pd.to_numeric(df['Floor'], errors='coerce') == floor)].copy()
+    
+    if not this_unit_hist.empty:
+        # 修复：强制按 Sale Date 倒序 (最新的在上面)
+        this_unit_hist['Sale Date'] = pd.to_datetime(this_unit_hist['Sale Date'])
+        this_unit_hist = this_unit_hist.sort_values('Sale Date', ascending=False)
+        
+        # 格式化显示
+        display_hist = this_unit_hist[['Sale Date', 'Sale Price', 'Unit Price ($ psf)', 'Type']].copy()
+        display_hist['Sale Date'] = display_hist['Sale Date'].dt.strftime('%Y-%m-%d')
+        display_hist['Sale Price'] = display_hist['Sale Price'].apply(lambda x: f"${x:,.0f}")
+        display_hist['Unit Price ($ psf)'] = display_hist['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
+        
+        st.dataframe(
+            display_hist,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Sale Date": "交易日期",
+                "Sale Price": "成交价",
+                "Unit Price ($ psf)": "尺价 (psf)",
+                "Type": "户型"
+            }
+        )
+    else:
+        st.caption("该单位在记录周期内无历史交易。")
 
-        # PDF
-        st.markdown("---")
-        if PDF_AVAILABLE:
-            u_info = {'blk':res['blk'], 'unit':f"{res['flr']:02d}-{res['stk']}"}
-            v_data = {'value':val, 'area':res['area'], 'psf':res['psf']}
-            a_data = {'net_gain':gain, 'ssd_cost':ssd, 'last_price':last_p}
-            d_cut = df['Sale Date'].max().strftime('%Y-%m-%d')
-            try:
-                pdf = generate_pdf_report(project_name, u_info, v_data, a_data, hist, res['comps'], d_cut)
-                st.download_button("📄 下载 PDF 信函", data=pdf, file_name="Valuation.pdf", mime="application/pdf", type="primary", use_container_width=True)
-            except Exception: st.warning("PDF暂不可用")
+    st.divider()
+
+    # 6. 参考交易 (Surrounding Reference)
+    # 修复：标题改为“参考交易”，并增加“户型”列
+    st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
+    
+    # 按相关性排序 (权重越高越靠前)
+    comps = comps.sort_values('Weight', ascending=False).head(10)
+    
+    comp_display = comps[['Sale Date', 'BLK', 'Floor', 'Stack', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']].copy()
+    comp_display['Sale Date'] = comp_display['Sale Date'].dt.strftime('%Y-%m-%d')
+    comp_display['Sale Price'] = comp_display['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
+    comp_display['Unit Price ($ psf)'] = comp_display['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
+    comp_display['Unit'] = comp_display['BLK'] + " #" + comp_display['Floor'] + "-" + comp_display['Stack']
+    
+    # 调整列顺序，加入“Type (户型)”
+    final_cols = ['Sale Date', 'Unit', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']
+    
+    st.dataframe(
+        comp_display[final_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Sale Date": "日期",
+            "Unit": "单位",
+            "Type": "户型",   # <--- 新增
+            "Area (sqft)": "面积",
+            "Sale Price": "总价",
+            "Unit Price ($ psf)": "尺价"
+        }
+    )
