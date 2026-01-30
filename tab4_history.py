@@ -56,9 +56,9 @@ def render(df_raw):
     df = df.sort_values('Sale Date', ascending=False)
 
     # 3. 构造显示列
-    # 单位 (Unit): 拼接 BLK + Floor + Stack
+    # 修改：增加 BLK 前缀
     df['Unit'] = df.apply(
-        lambda row: f"{row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
+        lambda row: f"BLK {row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
         axis=1
     )
     
@@ -70,7 +70,6 @@ def render(df_raw):
     df['Unit Price Str'] = df['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
     
     # 4. 筛选显示的列 (完全对齐 Tab 3)
-    # 列顺序：日期 | 单位 | 户型 | 面积 | 总价 | 尺价
     display_cols = ['Sale Date Str', 'Unit', 'Type', 'Area (sqft)', 'Sale Price Str', 'Unit Price Str']
     
     # 5. 渲染表格
