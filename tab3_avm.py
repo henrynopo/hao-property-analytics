@@ -34,6 +34,10 @@ def clean_and_prepare_data(df_raw):
             df['Unit Price ($ psf)'] = df['Sale Price'] / df['Area (sqft)']
         else:
             df['Unit Price ($ psf)'] = 0
+    
+    # 新增：全局统一楼层为整数，方便精准匹配
+    # 处理 '05', '5', '05.0' 等情况
+    df['Floor_Int'] = pd.to_numeric(df['Floor'], errors='coerce').fillna(0).astype(int)
             
     return df
 
@@ -58,29 +62,33 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     else:
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
     
-    # 2. 获取本单位/Stack 的基础信息
-    this_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
+    # 2. 获取本单位基础信息 (精准匹配)
+    # V167 修正：必须同时匹配 BLK, Stack, 和 Floor_Int
+    this_unit_exact_tx = df[
+        (df['BLK'] == target_blk) & 
+        (df['Stack'] == target_stack) & 
+        (df['Floor_Int'] == int(target_floor))
+    ]
     
     # --- 面积精准修正逻辑 ---
-    if not this_stack_tx.empty:
-        # 优先：本单位历史交易面积
-        est_area = this_stack_tx.iloc[0]['Area (sqft)']
+    if not this_unit_exact_tx.empty:
+        # 情况A: 本单位(具体到楼层)有历史交易 -> 100% 准确
+        est_area = this_unit_exact_tx.iloc[0]['Area (sqft)']
         
-        # 属性信息
-        latest_rec = this_stack_tx.sort_values('Sale Date', ascending=False).iloc[0]
+        # 属性信息优先取本单位最新的
+        latest_rec = this_unit_exact_tx.sort_values('Sale Date', ascending=False).iloc[0]
         info_tenure = str(latest_rec.get('Tenure', '-'))
         info_from = str(latest_rec.get('Tenure From', '-'))
         info_subtype = str(latest_rec.get('Sub Type', '-'))
     else:
-        # 次选：同 Stack 的众数面积 (Mode)
-        # 相比 iloc[0]，取众数能排除偶尔出现的特殊户型(如Penthouse)的影响
+        # 情况B: 本单位无交易 -> 尝试找同 Stack 的其他楼层
         same_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
         
         if not same_stack_tx.empty:
-            # 取出现次数最多的面积
+            # 取众数 (Mode) 排除个别异类
             est_area = same_stack_tx['Area (sqft)'].mode()[0]
         else:
-            # 保底：同类户型中位数
+            # 情况C: 整列都没交易 -> 用同类中位数保底
             est_area = recent_comps['Area (sqft)'].median() if 'recent_comps' in locals() else comps['Area (sqft)'].median()
         
         # 属性信息用众数填充
@@ -100,9 +108,9 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         return None, None, {}, pd.DataFrame(), 0
 
     # 4. 计算调整后尺价
-    recent_comps['Floor_Num'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
+    # 使用新生成的 Floor_Int 进行计算
     recent_comps['Adj_PSF'] = recent_comps.apply(
-        lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Num']) * 0.005), 
+        lambda row: row['Unit Price ($ psf)'] * (1 + (target_floor - row['Floor_Int']) * 0.005), 
         axis=1
     )
     
@@ -121,58 +129,48 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     return est_price, est_psf, extra_info, recent_comps, est_area
 
-# --- 渲染仪表盘 (V165: 绝对数值对称) ---
+# --- 渲染仪表盘 (V166: 标题外置 + 微缩) ---
 def render_gauge(est_psf, font_size=12):
-    # 1. 蓝色区间 (Steps): 严格 +/- 10%
-    # 不做任何取整，保持浮点精度
     range_min = est_psf * 0.90
     range_max = est_psf * 1.10
-    
-    # 2. 仪表盘总刻度 (Axis): 严格 +/- 20%
-    # 这样 est_psf 必然是 (0.8 + 1.2) / 2 = 1.0 的中心点
     axis_min = est_psf * 0.80
     axis_max = est_psf * 1.20
         
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = est_psf,
-        number = {'suffix': " psf", 'font': {'size': 20}},
+        number = {'suffix': " psf", 'font': {'size': 18}}, 
         domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "预估尺价 (Estimated PSF)", 'font': {'size': 14, 'color': "gray"}},
         gauge = {
             'axis': {
                 'range': [axis_min, axis_max], 
                 'tickwidth': 1, 
                 'tickcolor': "darkblue",
-                # 为了视觉绝对干净，我们强制只显示3个刻度：最小值、预估值(中点)、最大值
                 'tickmode': 'array',
                 'tickvals': [axis_min, est_psf, axis_max],
                 'ticktext': [f"{int(axis_min)}", f"{int(est_psf)}", f"{int(axis_max)}"]
             },
-            'bar': {'thickness': 0}, # 隐藏原来的进度条
+            'bar': {'thickness': 0}, 
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "#e5e7eb",
             'steps': [
-                # 灰色背景 (-20% ~ -10%)
                 {'range': [axis_min, range_min], 'color': "#f3f4f6"},
-                # 蓝色区间 (-10% ~ +10%) -> 视觉占比 50%，绝对居中
                 {'range': [range_min, range_max], 'color': "#2563eb"},
-                # 灰色背景 (+10% ~ +20%)
                 {'range': [range_max, axis_max], 'color': "#f3f4f6"}
             ],
             'threshold': {
-                'line': {'color': "#dc2626", 'width': 4},
+                'line': {'color': "#dc2626", 'width': 3},
                 'thickness': 0.8,
                 'value': est_psf
             }
         }
     ))
     fig.update_layout(
-        height=180, 
-        margin=dict(l=25, r=25, t=30, b=30),
+        height=150, 
+        margin=dict(l=20, r=20, t=10, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
-        font={'family': "Arial", 'size': 12}
+        font={'family': "Arial", 'size': 11}
     )
     return fig
 
@@ -215,7 +213,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     c1, c2 = st.columns([1, 1.5])
     
-    # 文字部分：严格 +/- 10%
     low_bound = est_price * 0.90
     high_bound = est_price * 1.10
     
@@ -230,13 +227,21 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         """, unsafe_allow_html=True)
 
     with c2:
+        st.markdown(
+            "<h5 style='text-align: center; color: #64748b; font-size: 14px; margin-bottom: 0px;'>预估尺价 (Estimated PSF)</h5>", 
+            unsafe_allow_html=True
+        )
         st.plotly_chart(render_gauge(est_psf, chart_font_size), use_container_width=True)
 
     st.divider()
 
     # 本单位历史
-    st.markdown("#### 📜 本单位历史 (Unit History)")
-    this_unit_hist = df[(df['BLK'] == blk) & (df['Stack'] == stack) & (pd.to_numeric(df['Floor'], errors='coerce') == floor)].copy()
+    # V167 修正：使用 Floor_Int 进行精准过滤
+    this_unit_hist = df[
+        (df['BLK'] == blk) & 
+        (df['Stack'] == stack) & 
+        (df['Floor_Int'] == int(floor))
+    ].copy()
     
     final_cols = ['Sale Date', 'Unit', 'Type', 'Area (sqft)', 'Sale Price', 'Unit Price ($ psf)']
     col_config = {
