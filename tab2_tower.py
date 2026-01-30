@@ -6,60 +6,33 @@ import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 0. 核心修复：优先处理跳转信号 ---
-# 在渲染任何内容前，先检查 URL 是否带有跳转指令
-# 这样即使页面刷新，也能第一时间拦截并执行跳转
-if "target_unit" in st.query_params:
-    try:
-        # 解析参数
-        t_blk, t_f, t_s = st.query_params["target_unit"].split('|')
-        
-        # 1. 设置 AVM 目标
-        st.session_state['avm_target'] = {
-            'blk': t_blk, 
-            'floor': int(t_f), 
-            'stack': t_s
-        }
-        
-        # 2. 同步更新当前选中的 Block（防止试图跳转 Block 不变）
-        st.session_state.selected_blk = t_blk
-        
-        # 3. 清除参数防止死循环
-        st.query_params.clear()
-        
-        # 4. 执行 Tab 切换 JS
-        # 注意：这里使用更暴力的 JS 寻找 Tab，增加兼容性
-        jump_js = """
-        <script>
-            setTimeout(function(){
-                var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-                if (tabs.length > 2) { tabs[2].click(); }
-            }, 500);
-        </script>
-        """
-        components.html(jump_js, height=0)
-        
-    except Exception as e:
-        st.error(f"跳转错误: {e}")
-        st.query_params.clear()
+# --- 0. 跳转脚本 ---
+def switch_to_tab_3():
+    js = """
+    <script>
+        var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+        if (tabs.length > 2) { tabs[2].click(); }
+    </script>
+    """
+    components.html(js, height=0)
 
 # --- 1. SSD 逻辑 ---
-def get_ssd_status(purchase_date):
-    if pd.isna(purchase_date): return "", "#f9fafb", "#9ca3af", "none"
+def get_ssd_info(purchase_date):
+    if pd.isna(purchase_date): return "", "none"
     if not isinstance(purchase_date, datetime): purchase_date = pd.to_datetime(purchase_date)
     today = datetime.now()
     POLICY_2025 = pd.Timestamp("2025-07-04")
     lock_years = 4 if purchase_date >= POLICY_2025 else 3
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
-    if today >= ssd_deadline: return "", "#f0fdf4", "#166534", "safe"
+    if today >= ssd_deadline: return "", "safe"
     days_left = (ssd_deadline - today).days
     diff = relativedelta(today, purchase_date)
     years_held = diff.years + 1
     rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
     rate = rates.get(years_held, "4%")
-    if days_left < 90: return f"🔥{rate}({days_left}d)", "#fef08a", "#854d0e", "hot" 
-    elif days_left < 180: return f"⚠️{rate}({days_left//30}m)", "#fed7aa", "#9a3412", "warm" 
-    else: return f"{rate} SSD", "#fca5a5", "#7f1d1d", "locked"
+    if days_left < 90: return f"🔥{rate}({days_left}d)", "hot" 
+    elif days_left < 180: return f"⚠️{rate}({days_left//30}m)", "warm" 
+    else: return f"🔒{rate}", "locked"
 
 def format_unit(floor, stack):
     return f"#{int(floor):02d}-{str(stack).zfill(2) if str(stack).isdigit() else stack}"
@@ -71,50 +44,80 @@ def natural_key(string_):
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # -------------------------------------------------------
-    # A. 楼座选择器 (回归原生 Button 以保证 100% 点击有效)
-    # -------------------------------------------------------
-    # 我们使用 CSS 欺骗视觉，让原生 Button 看起来像胶囊 Tag
+    # 💉 CSS 魔法：启用横向滚动条 (Scroll Bar)
     st.markdown("""
-    <style>
-        /* 让按钮像胶囊一样排列 */
+        <style>
+        /* 1. 强制列容器允许横向滚动 */
+        div[data-testid="stHorizontalBlock"] {
+            overflow-x: auto !important;
+            flex-wrap: nowrap !important; /* 禁止换行，强制在同一行 */
+            padding-bottom: 5px; /* 给滚动条留点空间 */
+        }
+        
+        /* 2. 强制每个列（单元格）保持最小宽度，不被挤压 */
+        div[data-testid="column"] {
+            flex: 0 0 auto !important; /* 禁止自动收缩 */
+            min-width: 80px !important; /* 设定最小宽度，确保内容完整 */
+            width: auto !important;
+        }
+
+        /* 3. 美化滚动条 (Webkit) */
+        div[data-testid="stHorizontalBlock"]::-webkit-scrollbar {
+            height: 6px;
+        }
+        div[data-testid="stHorizontalBlock"]::-webkit-scrollbar-thumb {
+            background-color: #d1d5db;
+            border-radius: 4px;
+        }
+
+        /* 4. 按钮样式微调 */
         div.stButton > button {
-            border-radius: 20px !important;
-            padding: 2px 10px !important;
-            font-size: 13px !important;
-            border: 1px solid #d1d5db;
+            width: 100%;
+            padding: 2px !important;
+            font-size: 12px !important;
+            line-height: 1.2 !important;
+            border-radius: 4px !important;
+            min-height: 60px !important;
+            height: 60px !important;
+            white-space: pre !important;
         }
-        /* 选中状态的高亮 */
-        div.stButton > button:focus, div.stButton > button:active {
-            border-color: #2563eb !important;
-            color: #2563eb !important;
+        
+        /* 颜色定义 */
+        div.stButton > button[kind="primary"] {
+            background-color: #fef2f2 !important; color: #991b1b !important; border: 1px solid #fca5a5 !important;
         }
-    </style>
+        div.stButton > button[kind="secondary"] {
+            background-color: #f9fafb !important; color: #111827 !important; border: 1px solid #e5e7eb !important;
+        }
+        
+        /* 楼座选择按钮单独样式覆盖 (让它们看起来像 Tag) */
+        /* 由于无法单独区分，我们接受它们也变宽，或者在下方单独处理 */
+        </style>
     """, unsafe_allow_html=True)
 
+    # -------------------------------------------------------
+    # A. 楼座选择
+    # -------------------------------------------------------
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     if 'selected_blk' not in st.session_state: st.session_state.selected_blk = all_blks[0]
 
-    # 使用 columns 布局来实现自动换行效果 (每行 6-8 个)
-    # 这样既保证了是原生按钮(可点击)，又不会占太高空间
     st.write("选择楼座 (Block):")
-    
-    # 动态计算列数，防止报错
+    # 为了让楼座按钮不出现长长的横向滚动条，我们还是手动分行
+    # CSS 会让每一行都变成 scrollable，但如果只有 8 个按钮，不会触发 scroll
     cols_per_row = 8
     rows = [all_blks[i:i + cols_per_row] for i in range(0, len(all_blks), cols_per_row)]
     
     for row_blks in rows:
-        cols = st.columns(cols_per_row)
+        cols = st.columns(len(row_blks)) # 动态长度
         for idx, blk in enumerate(row_blks):
             with cols[idx]:
-                # 选中态视觉区分
                 b_type = "primary" if st.session_state.selected_blk == blk else "secondary"
-                if st.button(blk, key=f"btn_blk_{blk}", type=b_type, use_container_width=True):
+                if st.button(blk, key=f"blk_{blk}", type=b_type, use_container_width=True):
                     st.session_state.selected_blk = blk
                     st.rerun()
 
     # -------------------------------------------------------
-    # B. 楼宇网格 (HTML)
+    # B. 楼宇网格 (带 Scroll Bar)
     # -------------------------------------------------------
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
@@ -125,86 +128,61 @@ def render(df, chart_font_size=12):
     floors = sorted(blk_df['F_Sort'].unique(), reverse=True)
     tx_map = blk_df.sort_values('Sale Date').groupby(['F_Sort', 'Stack']).tail(1).set_index(['F_Sort', 'Stack']).to_dict('index')
 
-    html_grid = f"""
-    <style>
-        body {{ margin: 0; padding: 0; overflow: hidden; }}
-        .grid-table {{ border-collapse: separate; border-spacing: 4px; table-layout: fixed; }}
-        .unit-btn {{
-            width: 85px; height: 62px; border-radius: 4px; border: 1px solid #e5e7eb;
-            text-align: center; cursor: pointer; display: flex; flex-direction: column; 
-            justify-content: center; align-items: center; font-family: sans-serif; transition: transform 0.1s;
-        }}
-        .unit-btn:hover {{ border-color: #4b5563; transform: scale(1.03); }}
-        .u-no {{ font-size: 11px; font-weight: 800; color: #111827; margin: 0; }}
-        .u-pr {{ font-size: 10px; font-weight: 600; color: #374151; margin: 1px 0; }}
-        .u-ss {{ font-size: 9px; font-weight: bold; margin: 0; }}
-    </style>
-    <div id="grid-content" style="padding-bottom: 40px;">
-        <table class="grid-table">
-    """
-    for f in floors:
-        html_grid += "<tr>"
-        for s in all_stacks:
-            unit_no = format_unit(f, s)
-            data = tx_map.get((f, s))
-            p_str, ssd_txt, bg, tc = "-", "", "#f9fafb", "#9ca3af"
-            if data:
-                p_str = f"${data['Sale Price']/1e6:.1f}M"
-                ssd_txt, bg, tc, _ = get_ssd_status(data['Sale Date'])
-            
-            # 点击触发 URL 变更
-            click_js = f"window.parent.location.search = '?target_unit={selected_blk}|{f}|{s}';"
-            
-            html_grid += f"""
-            <td><div class="unit-btn" style="background-color: {bg};" onclick="{click_js}">
-                <div class="u-no">{unit_no}</div><div class="u-pr">{p_str}</div><div class="u-ss" style="color: {tc};">{ssd_txt}</div>
-            </div></td>
-            """
-        html_grid += "</tr>"
-    html_grid += "</table></div>"
+    st.markdown("---")
+    st.caption(f"当前显示: Block {selected_blk} | ↔️ 内容较宽时，请左右滑动或按住 Shift+滚轮查看")
     
-    # 简单粗暴的高度计算，不依赖回调
-    components.html(html_grid, height=(len(floors) * 70) + 50)
+    for f in floors:
+        # 这里 st.columns 会被 CSS 强制不换行，且溢出滚动
+        cols = st.columns(len(all_stacks))
+        for i, s in enumerate(all_stacks):
+            with cols[i]:
+                unit_no = format_unit(f, s)
+                data = tx_map.get((f, s))
+                
+                label = f"{unit_no}\n-\n "
+                b_type = "secondary"
+                help_txt = "无历史记录"
+                
+                if data:
+                    price = f"${data['Sale Price']/1e6:.1f}M"
+                    ssd_txt, status = get_ssd_info(data['Sale Date'])
+                    if status in ["hot", "warm", "locked"]: b_type = "primary"
+                    label = f"{unit_no}\n{price}\n{ssd_txt if ssd_txt else ' '}"
+                    help_txt = f"点击跳转估值\n成交价: {price}\n日期: {data['Sale Date'].strftime('%Y-%m-%d')}"
+
+                if st.button(label, key=f"u_{selected_blk}_{f}_{s}", type=b_type, help=help_txt, use_container_width=True):
+                    st.session_state['avm_target'] = {'blk': selected_blk, 'floor': f, 'stack': s}
+                    switch_to_tab_3()
 
     # -------------------------------------------------------
-    # C. 颜色图例 (Legend)
+    # C. 备注 & 预警
     # -------------------------------------------------------
-    st.markdown("""
-        <div style="display:flex; flex-wrap:wrap; gap:15px; font-size:12px; margin-top:-20px; margin-bottom:15px; color:#4b5563;">
-            <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#fca5a5; border-radius:2px; margin-right:5px;"></div> 🔴 > 6月</div>
-            <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#fed7aa; border-radius:2px; margin-right:5px;"></div> 🟠 3-6月</div>
-            <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#fef08a; border-radius:2px; margin-right:5px;"></div> 🟡 0-3月</div>
-            <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#f0fdf4; border-radius:2px; margin-right:5px;"></div> 🟢 Safe / 无记录</div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown("---")
+    st.caption("🔴 SSD期内 (含 🔥3月内 / ⚠️6月内) | ⚪ 安全/无记录")
 
-    # -------------------------------------------------------
-    # D. SSD 临期全局快报
-    # -------------------------------------------------------
-    with st.expander("🚀 全局 SSD 临期预警快报 (全项目 0-6个月单位)", expanded=False):
+    with st.expander("🚀 全局 SSD 临期预警快报 (0-6个月)", expanded=False):
         latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor', 'Stack']).tail(1).copy()
         hot_list, warm_list = [], []
         for _, row in latest_txs.iterrows():
-            txt, bg, tc, status = get_ssd_status(row['Sale Date'])
+            txt, status = get_ssd_info(row['Sale Date'])
             if status in ["hot", "warm"]:
-                info = {"label": f"{format_unit(row['Floor'], row['Stack'])} @ {row['BLK']}", "ssd": txt, "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']}
+                info = {"label": f"{format_unit(row['Floor'], row['Stack'])} @ {row['BLK']}", "ssd": txt, 
+                        "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']}
                 if status == "hot": hot_list.append(info)
                 else: warm_list.append(info)
         
-        if not hot_list and not warm_list:
-            st.info("无临期单位")
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("##### 🟡 0-3月 (🔥)")
-                for item in hot_list:
-                    # 使用 URL 参数跳转法
-                    if st.button(f"{item['label']}\n{item['ssd']}", key=f"h_{item['label']}"):
-                        st.query_params['target_unit'] = f"{item['blk']}|{item['f']}|{item['s']}"
-                        st.rerun()
-            with c2:
-                st.markdown("##### 🟠 3-6月 (⚠️)")
-                for item in warm_list:
-                    if st.button(f"{item['label']}\n{item['ssd']}", key=f"w_{item['label']}"):
-                        st.query_params['target_unit'] = f"{item['blk']}|{item['f']}|{item['s']}"
-                        st.rerun()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### 🔥 0-3月 (Yellow/Red)")
+            for item in hot_list:
+                if st.button(f"{item['label']}  {item['ssd']}", key=f"hot_{item['label']}"):
+                    st.session_state.selected_blk = item['blk']
+                    st.session_state['avm_target'] = {'blk': item['blk'], 'floor': int(item['f']), 'stack': item['s']}
+                    switch_to_tab_3()
+        with c2:
+            st.markdown("##### ⚠️ 3-6月 (Orange)")
+            for item in warm_list:
+                if st.button(f"{item['label']}  {item['ssd']}", key=f"warm_{item['label']}"):
+                    st.session_state.selected_blk = item['blk']
+                    st.session_state['avm_target'] = {'blk': item['blk'], 'floor': int(item['f']), 'stack': item['s']}
+                    switch_to_tab_3()
