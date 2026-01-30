@@ -347,18 +347,3 @@ def render_gauge(est_psf, font_size=12):
         font={'family': "Arial", 'size': 11}
     )
     return fig
-
-def render(df, project_name, chart_font_size):
-    import streamlit as st
-
-    st.subheader(f"💎 单元估值 - {project_name}")
-    st.caption("AVM demo – 尚未实现完整估值模型。")
-
-    # 简单示例：显示最近成交与一个仪表盘
-    if 'Unit Price ($ psf)' in df.columns:
-        latest_psf = df['Unit Price ($ psf)'].dropna().iloc[-1]
-        st.write("最近一笔成交单价 (psf):", int(latest_psf))
-        fig = render_gauge(latest_psf, font_size=chart_font_size)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("当前数据中缺少 `Unit Price ($ psf)` 列，无法生成 AVM 仪表盘。")
