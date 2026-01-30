@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 import re
+import time
 
 # --- 辅助：统一数据清洗 ---
 def clean_and_prepare_data(df_raw):
@@ -46,6 +47,7 @@ def format_unit(floor, stack):
     try:
         f_num = int(float(floor))
         s_str = str(stack)
+        # 补零逻辑：如果是数字字符串则补零，否则保持原样
         s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
         return f"#{f_num:02d}-{s_fmt}"
     except:
@@ -267,13 +269,16 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     if extra_info['from'] != '-' and extra_info['from'] != 'N/A': info_parts.append(f"From {str(extra_info['from'])}")
     
     info_str = " | ".join(info_parts)
+    
+    # [V178] 使用 format_unit 格式化标题中的单元号
+    formatted_unit_str = format_unit(floor, stack)
 
     st.markdown(f"""
     <div style="background-color:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:20px;">
         <p style="margin:0 0 5px 0; color:#64748b; font-size:12px; font-weight:bold; letter-spacing:1px; text-transform:uppercase;">
             {project_name}
         </p>
-        <h3 style="margin:0; color:#1e293b; font-size:24px;">BLK {blk} #{int(floor):02d}-{stack}</h3>
+        <h3 style="margin:0; color:#1e293b; font-size:24px;">BLK {blk} {formatted_unit_str}</h3>
         <p style="margin:5px 0 0 0; color:#475569; font-size:15px; font-weight:500;">
             {info_str}
         </p>
@@ -305,11 +310,11 @@ def render(df_raw, project_name="Project", chart_font_size=12):
             "<h5 style='text-align: center; color: #64748b; font-size: 14px; margin-bottom: 0px;'>预估尺价 (Estimated PSF)</h5>", 
             unsafe_allow_html=True
         )
-        # [核心修复] 添加 Key，强制每次销毁重建，解决错位问题
+        # 强制更新 Key
         st.plotly_chart(
             render_gauge(est_psf, chart_font_size), 
             use_container_width=True,
-            key=f"gauge_{blk}_{floor}_{stack}" 
+            key=f"gauge_{blk}_{floor}_{stack}_{time.time()}" 
         )
 
     st.divider()
