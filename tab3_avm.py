@@ -53,10 +53,6 @@ def format_unit(floor, stack):
 
 # --- 辅助：计算全场市场趋势 (All Units) ---
 def calculate_market_trend(full_df):
-    """
-    使用整个项目的所有数据计算年化增长率。
-    """
-    # 限制在最近 36 个月的数据
     limit_date = datetime.now() - pd.DateOffset(months=36)
     trend_data = full_df[full_df['Sale Date'] >= limit_date].copy()
     
@@ -74,7 +70,6 @@ def calculate_market_trend(full_df):
         if avg_price == 0: return 0.0
         
         annual_growth_rate = (slope / avg_price) * 365
-        # 安全钳位: -5% 到 +10%
         final_rate = max(-0.05, min(0.10, annual_growth_rate))
         return final_rate
     except:
@@ -103,10 +98,8 @@ def calculate_dynamic_floor_rate(comps):
 
 # --- 核心估值逻辑 ---
 def calculate_avm(df, target_blk, target_floor, target_stack):
-    # 1. 计算全场市场增长趋势
     market_annual_growth = calculate_market_trend(df)
 
-    # 2. 确定目标单位面积 (精准锁定)
     this_unit_exact_tx = df[
         (df['BLK'] == target_blk) & 
         (df['Stack'] == target_stack) & 
@@ -135,9 +128,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         info_from = df['Tenure From'].mode()[0] if not df['Tenure From'].empty else '-'
         info_subtype = df['Sub Type'].mode()[0] if not df['Sub Type'].empty else '-'
 
-    # 3. [V172] 阶梯式面积筛选 (Stepped Area Filtering)
-    # 优先找 +/- 5%，不够找 10%，再不够找 15%
-    # 目标是至少找到 5 笔历史交易记录 (Pool Size)
     required_comps = 5
     thresholds = [0.05, 0.10, 0.15]
     
@@ -158,12 +148,10 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
             used_threshold = t
             break
             
-    # 如果循环结束还没凑够，就用最后一轮的结果
     if comps.empty and 'current_comps' in locals():
         comps = current_comps
-        used_threshold = 0.15 # 标记为最大
+        used_threshold = 0.15 
         
-    # 如果连 15% 都是空的 (极罕见)，保底扩到 20%
     if comps.empty:
         comps = df[
             (df['Area (sqft)'] >= est_area * 0.8) & 
@@ -171,12 +159,9 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         ].copy()
         used_threshold = 0.20
 
-    # 4. 时间筛选 (Time Window)
-    # 优先看近 36 个月
     limit_date = datetime.now() - pd.DateOffset(months=36)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
     
-    # 实在不行看近 60 个月
     if recent_comps.empty:
         limit_date = datetime.now() - pd.DateOffset(months=60)
         recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
@@ -184,25 +169,17 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     if recent_comps.empty:
         return None, None, {}, pd.DataFrame(), 0, 0, 0, 0
 
-    # 5. 动态计算楼层修正系数
     floor_adj_rate = calculate_dynamic_floor_rate(recent_comps)
 
-    # 6. 双重修正: 时间增长 + 楼层差异
     recent_comps['Floor_Int'] = pd.to_numeric(recent_comps['Floor'], errors='coerce').fillna(1)
     
     def apply_adjustment(row):
-        # A. 楼层修正
         floor_multiplier = 1 + (target_floor - row['Floor_Int']) * floor_adj_rate
-        
-        # B. 时间增长修正 (基于全场趋势)
         years_ago = (datetime.now() - row['Sale Date']).days / 365.0
         time_multiplier = 1 + (market_annual_growth * years_ago)
-        
         return row['Unit Price ($ psf)'] * floor_multiplier * time_multiplier
 
     recent_comps['Adj_PSF'] = recent_comps.apply(apply_adjustment, axis=1)
-    
-    # 权重仅用于置信度
     recent_comps['Days_Diff'] = (datetime.now() - recent_comps['Sale Date']).dt.days
     recent_comps['Weight'] = 1 / (recent_comps['Days_Diff'] + 30)
     
@@ -217,7 +194,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
         'type': target_type
     }
     
-    # 多返回一个 used_threshold 用于显示
     return est_price, est_psf, extra_info, recent_comps, est_area, floor_adj_rate, market_annual_growth, used_threshold
 
 # --- 渲染仪表盘 ---
@@ -277,7 +253,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     blk, floor, stack = target['blk'], target['floor'], target['stack']
     df = clean_and_prepare_data(df_raw)
     
-    # V172: 接收 used_threshold
     est_price, est_psf, extra_info, comps, area, floor_adj, market_growth, used_threshold = calculate_avm(df, blk, floor, stack)
     
     if est_price is None:
@@ -316,7 +291,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         floor_txt = f"{floor_adj*100:+.2f}%/层"
         trend_txt = f"{market_growth*100:+.1f}%/年"
         
-        # 文案更新：显示相似度
         st.caption(f"基于 {len(comps)} 笔同面积交易 (相似度 ±{int(used_threshold*100)}%)")
         st.caption(f"修正因子: 楼层 {floor_txt} | 市场趋势 {trend_txt}")
         
@@ -331,7 +305,12 @@ def render(df_raw, project_name="Project", chart_font_size=12):
             "<h5 style='text-align: center; color: #64748b; font-size: 14px; margin-bottom: 0px;'>预估尺价 (Estimated PSF)</h5>", 
             unsafe_allow_html=True
         )
-        st.plotly_chart(render_gauge(est_psf, chart_font_size), use_container_width=True)
+        # [核心修复] 添加 Key，强制每次销毁重建，解决错位问题
+        st.plotly_chart(
+            render_gauge(est_psf, chart_font_size), 
+            use_container_width=True,
+            key=f"gauge_{blk}_{floor}_{stack}" 
+        )
 
     st.divider()
 
