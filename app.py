@@ -1,10 +1,12 @@
-# app.py
 import streamlit as st
 from utils import PROJECTS, load_data, auto_categorize, estimate_inventory, natural_key, mark_penthouse
+
+# --- Import Modules ---
 import tab1_market
 import tab2_tower
 import tab3_avm
 import tab4_history
+import tab5_settings  # [新增] 引入 Tab 5
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
@@ -31,7 +33,6 @@ with st.sidebar:
 
     if df is not None:
         cat_ops = ["按户型面积段 (自动分箱)", "按楼座 (Block)"]
-        # 避免重复添加
         has_bedroom = False
         for c in ['Bedroom Type', 'Bedrooms', 'Type']:
             if c in df.columns: has_bedroom = True; break
@@ -56,7 +57,6 @@ if df is not None:
     unique_cats = sorted(df['Category'].unique(), key=natural_key)
     inventory_map = {}
     
-    # 🟢 核心修复: 确保推定数据只计算一次，且变量名清晰
     estimated_counts = {}
     if inventory_mode.startswith("🤖") and 'Stack' in df.columns:
         with st.spinner("正在智能推算全盘库存..."):
@@ -69,10 +69,8 @@ if df is not None:
         cols = st.columns(2)
         
         for i, cat in enumerate(unique_cats):
-            # 🟢 逻辑修复: 优先取推定值，取不到则默认100
             if inventory_mode.startswith("🤖"):
                 default_val = int(estimated_counts.get(cat, 100))
-                # 再次兜底，防止算出0或负数
                 if default_val < 1: default_val = 1
             else:
                 default_val = 100 
@@ -82,7 +80,7 @@ if df is not None:
                     f"[{cat}]", 
                     value=default_val, 
                     min_value=1, 
-                    key=f"inv_input_{i}_{category_method}" # 增加 key 的唯一性，防止切换分类时报错
+                    key=f"inv_input_{i}_{category_method}"
                 )
                 inventory_map[cat] = val
 
@@ -90,12 +88,20 @@ if df is not None:
     st.title(f"🏙️ {project_name} 市场透视")
     st.caption(f"数据范围: {df['Sale Date'].min().date()} 至 {df['Sale Date'].max().date()} | 总交易: {len(df)} 宗")
 
-    t1, t2, t3, t4 = st.tabs(["📊 市场概览", "🏢 楼宇透视", "💎 单元估值", "📝 成交记录"])
+    # [修改] 增加第 5 个 Tab: "⚙️ 设定"
+    t1, t2, t3, t4, t5 = st.tabs([
+        "📊 市场概览", 
+        "🏢 楼宇透视", 
+        "💎 单元估值", 
+        "📝 成交记录", 
+        "⚙️ 设定"
+    ])
     
     with t1: tab1_market.render(df, chart_color, chart_font_size, inventory_map)
     with t2: tab2_tower.render(df, chart_font_size)
     with t3: tab3_avm.render(df, project_name, chart_font_size)
     with t4: tab4_history.render(df)
+    with t5: tab5_settings.render()  # [新增] 渲染 Tab 5
 
 else:
     st.info("👈 请在左侧选择项目或上传 CSV 文件。")
