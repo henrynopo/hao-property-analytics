@@ -2,18 +2,19 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import re
+import time
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 0. 核心跳转逻辑 ---
+# --- 0. 核心跳转逻辑 (回调函数) ---
 def go_to_valuation(blk, floor, stack):
-    # 设置目标
+    # 1. 更新目标单位数据
     st.session_state['avm_target'] = {
         'blk': blk,
         'floor': int(floor),
         'stack': stack
     }
-    # 设置触发器
+    # 2. 开启跳转开关
     st.session_state['trigger_tab_switch'] = True
 
 # --- 1. 数据清洗与辅助 ---
@@ -26,15 +27,12 @@ def clean_data(df_raw):
         'Sale Date': 'Sale Date'
     }
     df.rename(columns=rename_map, inplace=True)
-    
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
-        
     return df
 
 def get_ssd_display(purchase_date):
     if pd.isna(purchase_date): return "", "" 
-    
     if not isinstance(purchase_date, datetime): purchase_date = pd.to_datetime(purchase_date)
     today = datetime.now()
     POLICY_2025 = pd.Timestamp("2025-07-04")
@@ -69,32 +67,37 @@ def shorten_type(type_str):
 
 # --- 2. 渲染主函数 ---
 def render(df_raw, chart_font_size=12):
-    # [修复 Bug 1] 状态初始化移到最前，确保 UI 渲染时已有状态
+    # [Step 1] 数据清洗与 Block 列表生成 (最优先执行)
     df = clean_data(df_raw)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
+    # [Step 2] 修复 Bug 1: 确保 Session State 在渲染按钮前已初始化
     if 'selected_blk' not in st.session_state:
         st.session_state.selected_blk = all_blks[0]
+    elif st.session_state.selected_blk not in all_blks:
+        # 防止切换数据集后旧 Block 不存在
+        st.session_state.selected_blk = all_blks[0]
 
-    # [修复 Bug 2] 跳转执行器
-    # 只要检测到 trigger 为 True，就注入 JS，然后重置 trigger
+    # [Step 3] 修复 Bug 2: 强制跳转逻辑
+    # 使用 time.time() 作为 key，强制 Streamlit 认为这是新组件，从而每次都执行 JS
     if st.session_state.get('trigger_tab_switch', False):
-        components.html("""
+        js_code = """
         <script>
-            // 尝试查找 Streamlit 的 Tab 按钮并点击第3个 (索引2)
+            // 查找所有 Tab 按钮
             var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-            if (tabs.length > 2) { 
-                tabs[2].click(); 
+            // 假设 Tab 3 是第3个 (索引2)
+            if (tabs.length > 2) {
+                tabs[2].click();
                 window.parent.scrollTo(0, 0);
             }
         </script>
-        """, height=0)
-        # 执行完后重置，防止无限刷新
-        st.session_state['trigger_tab_switch'] = False
+        """
+        components.html(js_code, height=0, key=f"nav_js_{time.time()}")
+        st.session_state['trigger_tab_switch'] = False # 重置触发器
 
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # CSS: 保持紧凑布局
+    # CSS 样式
     st.markdown("""
         <style>
         div.stButton > button {
@@ -123,7 +126,7 @@ def render(df_raw, chart_font_size=12):
         </style>
     """, unsafe_allow_html=True)
 
-    # 楼座选择 (Block Selection)
+    # [Step 4] 渲染 Block 选择器
     st.write("选择楼座 (Block):")
     cols_per_row = 8
     rows = [all_blks[i:i + cols_per_row] for i in range(0, len(all_blks), cols_per_row)]
@@ -132,13 +135,13 @@ def render(df_raw, chart_font_size=12):
         cols = st.columns(len(row_blks))
         for idx, blk in enumerate(row_blks):
             with cols[idx]:
-                # 此时 st.session_state.selected_blk 必定有值，颜色判断准确
+                # 此时 selected_blk 已经保证有值且正确，颜色渲染正常
                 b_type = "primary" if st.session_state.selected_blk == blk else "secondary"
                 if st.button(blk, key=f"blk_{blk}", type=b_type, use_container_width=True):
                     st.session_state.selected_blk = blk
                     st.rerun()
 
-    # 数据准备
+    # [Step 5] 渲染单元格
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     
@@ -187,13 +190,12 @@ def render(df_raw, chart_font_size=12):
                         ssd_icon = "" 
 
                     area_str = f"{u_area:,}sf" if u_area > 0 else "-"
-                    
                     line2_parts = [u_type, area_str]
                     if ssd_icon: line2_parts.append(ssd_icon)
                     line2_str = " | ".join(line2_parts)
-                    
                     label = f"{unit_no}\n{line2_str}"
                     
+                    # 使用回调函数进行状态更新，确保原子性
                     st.button(
                         label, 
                         key=f"btn_{selected_blk}_{f}_{s}", 
