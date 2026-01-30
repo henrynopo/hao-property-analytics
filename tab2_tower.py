@@ -32,8 +32,10 @@ def clean_data(df_raw):
     if 'Sale Date' in df.columns:
         df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
     
-    # [V182] 强力清洗：填充所有空值为特定占位符，防止 NaN 传播
+    # 强制 BLK 列为字符串
     df['BLK'] = df['BLK'].astype(str)
+    
+    # 户型列预处理，填充空值
     if 'Type' not in df.columns: df['Type'] = "-"
     df['Type'] = df['Type'].fillna("-").astype(str)
     
@@ -74,10 +76,10 @@ def natural_key(string_):
     return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', str(string_))]
 
 def shorten_type(type_str):
-    # [V182] 增强型字符串处理
+    # 增强型字符串处理
     if not isinstance(type_str, str): return "-"
     s = type_str.strip()
-    if s.lower() in ['nan', 'none', '', 'null']: return "-"
+    if s.lower() in ['nan', 'none', '', 'null', '0']: return "-"
     return s.replace("Bedroom", "Bed").replace("Maisonette", "Mais").replace("Apartment", "Apt")
 
 # --- 2. 渲染主函数 ---
@@ -85,11 +87,13 @@ def render(df_raw, chart_font_size=12):
     df = clean_data(df_raw)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
+    # Block 状态管理
     if 'selected_blk' not in st.session_state:
         st.session_state.selected_blk = str(all_blks[0])
     elif str(st.session_state.selected_blk) not in all_blks:
         st.session_state.selected_blk = str(all_blks[0])
 
+    # 跳转逻辑
     if st.session_state.get('trigger_tab_switch', False):
         js_code = f"""
         <script>
@@ -177,7 +181,7 @@ def render(df_raw, chart_font_size=12):
         s_data = blk_df[blk_df['Stack'] == s]
         if not s_data.empty:
             # 过滤掉无效值后再求众数
-            valid_types = s_data[~s_data['Type'].isin(['-', 'nan', 'NaN', ''])]['Type']
+            valid_types = s_data[~s_data['Type'].isin(['-', 'nan', 'NaN', '', '0'])]['Type']
             mode_type = valid_types.mode()[0] if not valid_types.empty else "-"
             
             mode_area = s_data['Area (sqft)'].mode()[0] if not s_data['Area (sqft)'].empty else 0
@@ -215,15 +219,18 @@ def render(df_raw, chart_font_size=12):
 
                     area_str = f"{u_area:,}sf" if u_area > 0 else "-"
                     
-                    # 组合显示: Type | Area [| Icon]
-                    # 确保 Type 不为空，避免视觉错位
-                    if u_type == "" or u_type == "-": u_type = "-"
+                    # [V183 布局优化]
+                    # Line 1: #05-01 🟩
+                    # Line 2: 3Bed | 1,216sf
                     
-                    line2_parts = [u_type, area_str]
-                    if ssd_icon: line2_parts.append(ssd_icon)
-                    line2_str = " | ".join(line2_parts)
+                    # 组合第一行：单元号 + SSD图标
+                    line1 = unit_no
+                    if ssd_icon: line1 += f" {ssd_icon}"
                     
-                    label = f"{unit_no}\n{line2_str}"
+                    # 组合第二行：户型 | 面积
+                    line2 = f"{u_type} | {area_str}"
+                    
+                    label = f"{line1}\n{line2}"
                     
                     st.button(
                         label, 
@@ -250,6 +257,7 @@ def render(df_raw, chart_font_size=12):
             type_val = shorten_type(str(row['Type']))
             area_val = f"{int(row['Area (sqft)']):,}sf"
             
+            # 列表显示保持详细，但图标移到最前
             label_str = f"{icon} {blk_val} | {unit_val} | {type_val} | {area_val} | {months_left}mths"
             
             if "🟨" in icon:
