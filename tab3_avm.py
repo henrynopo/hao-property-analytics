@@ -91,21 +91,22 @@ def format_unit_masked(floor):
     except:
         return f"#{floor}-XX"
 
+# [V197 Update] 地址格式优化: 3行紧凑格式
 def get_address_template(project_name, blk, unit_str):
     """根据 Project + Block 查找地址"""
-    # 使用 utils_address 的新查找逻辑
-    street, postal = utils_address.find_address_info(project_name, blk)
+    try:
+        street, postal = utils_address.find_address_info(project_name, blk)
+    except AttributeError:
+        street, postal = project_name, ""
     
-    # 兜底逻辑
-    if not street: street = project_name # 没配置路名就用项目名
+    if not street: street = project_name 
     
     if postal:
         postal_str = f"Singapore {postal}"
     else:
-        # 如果完全没配置，给一个默认格式
         postal_str = "Singapore XXXXXX"
-        
-    return f"Block {blk} {street}\n{unit_str}\n{postal_str}"
+    
+    return f"Block {blk} {street}\n{unit_str} {project_name}\n{postal_str}"
 
 def get_unit_specs(df, target_blk, target_floor, target_stack):
     this_unit = df[
@@ -223,7 +224,6 @@ def calculate_avm(df, target_blk, target_floor, target_stack, override_area=None
         limit_date = datetime.now() - pd.DateOffset(months=60)
         recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
 
-    # [V190 Fix] Ensure returning 8 values even on failure
     if recent_comps.empty:
         return None, None, {}, pd.DataFrame(), 0, 0, 0, 0
 
@@ -300,7 +300,8 @@ def render_gauge(est_psf, font_size=12):
     )
     return fig
 
-def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price, est_psf, comps_df, mailing_address, last_price=0, last_date=None):
+# [V198 Update] PDF 生成函数: 接收 recipient_name
+def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price, est_psf, comps_df, mailing_address, recipient_name="Dear Homeowner", last_price=0, last_date=None):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=72)
     styles = getSampleStyleSheet()
@@ -309,17 +310,34 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     styles.add(ParagraphStyle(name='Signature', fontSize=10, leading=12))
     elements = []
     
+    # 1. Header (Agent Info)
     header_text = f"<b>{AGENT_PROFILE['agency']}</b><br/>{AGENT_PROFILE['name']} | {AGENT_PROFILE['title']}<br/>{AGENT_PROFILE['contact']} | {AGENT_PROFILE['email']}<br/>CEA Reg: {AGENT_PROFILE['license']}"
     elements.append(Paragraph(header_text, styles['RightAlign']))
     elements.append(Spacer(1, 40))
     
+    # 2. Date & Address Block (Include Recipient Name)
     date_str = datetime.now().strftime("%d %B %Y")
     address_formatted = mailing_address.replace("\n", "<br/>")
-    address_text = f"{date_str}<br/><br/><b>To The Homeowner</b><br/>{address_formatted}"
+    
+    # 判断是否为默认称呼，如果不是，则加在地址上方
+    if recipient_name.lower().strip() not in ["dear homeowner", "homeowner"]:
+        clean_name = recipient_name.replace("Dear ", "").replace(",", "")
+        address_text = f"{date_str}<br/><br/><b>{clean_name}</b><br/>{address_formatted}"
+    else:
+        address_text = f"{date_str}<br/><br/><b>To The Homeowner</b><br/>{address_formatted}"
+        
     elements.append(Paragraph(address_text, styles['Normal']))
     elements.append(Spacer(1, 20))
     
-    elements.append(Paragraph("<b>Dear Homeowner,</b>", styles['Normal']))
+    # 3. Salutation (使用用户输入的称呼)
+    # 确保称呼后面有逗号
+    salutation = recipient_name.strip()
+    if not salutation.endswith(","):
+        salutation += ","
+    if not salutation.lower().startswith("dear"):
+        salutation = f"Dear {salutation}"
+        
+    elements.append(Paragraph(f"<b>{salutation}</b>", styles['Normal']))
     elements.append(Spacer(1, 12))
     
     unit_display = format_unit(floor, stack)
@@ -497,7 +515,18 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     
     default_address_str = get_address_template(project_name, blk, formatted_unit_str)
     
-    col_addr, col_map = st.columns([3, 1])
+    # [V198 Update] 添加“收件人”输入框
+    col_name, col_addr, col_map = st.columns([1.5, 3, 1])
+    
+    with col_name:
+        # 默认值为 Dear Homeowner
+        recipient_name = st.text_input(
+            "👤 收件人称呼 (Recipient)", 
+            value="Dear Homeowner",
+            help="将显示在信件开头，如 'Dear Mr. Tan'",
+            key=f"name_{widget_key_suffix}"
+        )
+        
     with col_addr:
         mailing_address = st.text_area(
             "📍 确认收件地址 (Mailing Address)", 
@@ -505,18 +534,22 @@ def render(df_raw, project_name="Project", chart_font_size=12):
             height=100,
             key=f"addr_{widget_key_suffix}"
         )
+        
     with col_map:
         st.write("") 
         st.write("") 
+        st.write("") # Spacer
         query_str = urllib.parse.quote(f"{project_name} Block {blk}")
         map_url = f"https://www.google.com/maps/search/?api=1&query={query_str}"
         st.link_button("🗺️ 核对邮编", map_url)
 
+    # 传递 recipient_name 到 PDF 生成函数
     pdf_bytes = generate_pdf_letter(
         project_name, blk, floor, stack, 
         area, extra_info['type'], 
         est_price, est_psf, comps,
         mailing_address=mailing_address, 
+        recipient_name=recipient_name, # [V198] Pass new param
         last_price=extra_info.get('last_price', 0),
         last_date=extra_info.get('last_date', None)
     )
