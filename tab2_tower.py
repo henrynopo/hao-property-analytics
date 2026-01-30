@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 1. SSD 核心计算函数 (共用) ---
+# --- 1. SSD 核心逻辑 ---
 def get_ssd_status(purchase_date):
     if pd.isna(purchase_date): 
         return "", "#f9fafb", "#9ca3af", "none"
@@ -42,75 +42,63 @@ def natural_key(string_):
 
 # --- 2. 渲染函数 ---
 def render(df, chart_font_size=12):
-    # --- 新增功能：SSD 0-6个月全局快报 ---
-    with st.expander("🚀 全局 SSD 临期预警 (0-6个月单位快报)", expanded=True):
-        # 扫描逻辑
-        latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor', 'Stack']).tail(1).copy()
-        
-        hot_list = [] # 0-3月
-        warm_list = [] # 3-6月
-        
-        for _, row in latest_txs.iterrows():
-            txt, bg, tc, status = get_ssd_status(row['Sale Date'])
-            unit_label = f"{format_unit(row['Floor'], row['Stack'])} @ {row['BLK']}"
-            info = {"label": unit_label, "ssd": txt, "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']}
-            
-            if status == "hot": hot_list.append(info)
-            elif status == "warm": warm_list.append(info)
-            
-        if not hot_list and not warm_list:
-            st.info("当前项目中没有 0-6 个月内即将解禁的单位。")
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("##### 🟡 0-3月内解禁 (🔥)")
-                for item in hot_list:
-                    if st.button(f"{item['label']} ({item['ssd']})", key=f"hot_{item['label']}"):
-                        st.session_state.selected_blk = item['blk']
-                        st.session_state['avm_target'] = {'blk': item['blk'], 'floor': int(item['f']), 'stack': item['s']}
-                        st.query_params['target_unit'] = f"{item['blk']}|{item['f']}|{item['s']}"
-                        st.rerun()
-            with c2:
-                st.markdown("##### 🟠 3-6月内解禁 (⚠️)")
-                for item in warm_list:
-                    if st.button(f"{item['label']} ({item['ssd']})", key=f"warm_{item['label']}"):
-                        st.session_state.selected_blk = item['blk']
-                        st.session_state['avm_target'] = {'blk': item['blk'], 'floor': int(item['f']), 'stack': item['s']}
-                        st.query_params['target_unit'] = f"{item['blk']}|{item['f']}|{item['s']}"
-                        st.rerun()
-
-    st.divider()
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # A. 楼座按钮组
+    # A. 楼座选择 (HTML 按钮组美化)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
-    if not all_blks: return
-    if 'selected_blk' not in st.session_state: st.session_state.selected_blk = all_blks[0]
+    if 'selected_blk' not in st.session_state: 
+        st.session_state.selected_blk = all_blks[0]
 
-    st.write("选择楼座 (Block):")
-    blk_cols = st.columns(len(all_blks))
-    for idx, blk_name in enumerate(all_blks):
-        with blk_cols[idx]:
-            style_type = "primary" if st.session_state.selected_blk == blk_name else "secondary"
-            if st.button(blk_name, key=f"blk_btn_{blk_name}", type=style_type, use_container_width=True):
-                st.session_state.selected_blk = blk_name
-                st.rerun()
+    # 构建横向按钮组 HTML
+    blk_options_html = '<div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:15px;">'
+    for blk_name in all_blks:
+        is_active = st.session_state.selected_blk == blk_name
+        bg = "#2563eb" if is_active else "#ffffff"
+        color = "#ffffff" if is_active else "#374151"
+        border = "#2563eb" if is_active else "#d1d5db"
+        blk_options_html += f"""
+        <div onclick="window.parent.postMessage({{type: 'streamlit:set_component_value', value: '{blk_name}', key: 'blk_click'}}, '*')"
+             style="padding: 6px 16px; border-radius: 4px; border: 1px solid {border}; background-color: {bg}; 
+                    color: {color}; cursor: pointer; font-size: 13px; font-weight: 600; font-family: sans-serif; transition: all 0.2s;">
+            {blk_name}
+        </div>
+        """
+    blk_options_html += '</div>'
+    
+    # 渲染楼座选择组件
+    components.html(blk_options_html + """
+        <script>
+        window.addEventListener('message', function(event) {
+            if (event.data.type === 'streamlit:set_component_value' && event.data.key === 'blk_click') {
+                const url = new URL(window.location);
+                url.searchParams.set('set_blk', event.data.value);
+                window.parent.location.search = url.searchParams.toString();
+            }
+        });
+        </script>
+    """, height=50)
+
+    # 拦截楼座切换信号
+    if "set_blk" in st.query_params:
+        st.session_state.selected_blk = st.query_params["set_blk"]
+        st.query_params.clear()
+        st.rerun()
 
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     
-    # B. 数据处理
+    # B. 楼宇网格数据处理
     f_col = 'Floor_Num' if 'Floor_Num' in blk_df.columns else 'Floor'
     blk_df['F_Sort'] = pd.to_numeric(blk_df[f_col], errors='coerce').fillna(0).astype(int)
     all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
     floors = sorted(blk_df['F_Sort'].unique(), reverse=True)
     tx_map = blk_df.sort_values('Sale Date').groupby(['F_Sort', 'Stack']).tail(1).set_index(['F_Sort', 'Stack']).to_dict('index')
 
-    # C. HTML 网格
+    # C. HTML 网格 (修复遮挡)
     html_grid = f"""
     <style>
         body {{ margin: 0; padding: 0; overflow: hidden; }}
-        .grid-table {{ border-collapse: separate; border-spacing: 4px; margin: 0; table-layout: fixed; }}
+        .grid-table {{ border-collapse: separate; border-spacing: 4px; table-layout: fixed; }}
         .unit-btn {{
             width: 85px; height: 60px; border-radius: 4px; border: 1px solid #e5e7eb;
             text-align: center; cursor: pointer; display: flex; flex-direction: column; 
@@ -121,7 +109,8 @@ def render(df, chart_font_size=12):
         .u-pr {{ font-size: 10px; font-weight: 600; color: #374151; margin: 1px 0; }}
         .u-ss {{ font-size: 9px; font-weight: bold; margin: 0; }}
     </style>
-    <div id="content"><table class="grid-table">
+    <div id="grid-content">
+        <table class="grid-table">
     """
 
     for f in floors:
@@ -142,17 +131,55 @@ def render(df, chart_font_size=12):
             """
         html_grid += "</tr>"
     html_grid += "</table></div>"
-    html_grid += """<script>
-        function sendHeight() {
-            const height = document.getElementById('content').offsetHeight + 5;
-            window.parent.postMessage({type: 'streamlit:set_height', height: height}, '*');
+
+    # JS 动态高度调节 (带 20px 额外安全垫)
+    html_grid += """
+    <script>
+        function updateHeight() {
+            const h = document.getElementById('grid-content').offsetHeight + 20;
+            window.parent.postMessage({type: 'streamlit:set_height', height: h}, '*');
         }
-        window.onload = sendHeight; window.onresize = sendHeight;
-    </script>"""
+        window.onload = updateHeight; window.onresize = updateHeight;
+    </script>
+    """
 
-    components.html(html_grid, height=(len(floors) * 66) + 10)
+    components.html(html_grid, height=(len(floors) * 66) + 30)
 
-    # D. 跳转监听
+    # D. SSD 临期快报 (移动至下方)
+    st.markdown("---")
+    with st.expander("🚀 全局 SSD 临期预警 (0-6个月单位快报)", expanded=False):
+        latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor', 'Stack']).tail(1).copy()
+        hot_list, warm_list = [], []
+        for _, row in latest_txs.iterrows():
+            txt, bg, tc, status = get_ssd_status(row['Sale Date'])
+            if status in ["hot", "warm"]:
+                info = {"label": f"{format_unit(row['Floor'], row['Stack'])} @ {row['BLK']}", "ssd": txt, 
+                        "blk": row['BLK'], "f": row['Floor'], "s": row['Stack']}
+                if status == "hot": hot_list.append(info)
+                else: warm_list.append(info)
+        
+        if not hot_list and not warm_list:
+            st.info("当前项目中没有即将解禁的单位。")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("##### 🟡 0-3月内解禁 (🔥)")
+                for item in hot_list:
+                    if st.button(f"{item['label']} ({item['ssd']})", key=f"h_{item['label']}"):
+                        st.session_state.selected_blk = item['blk']
+                        st.session_state['avm_target'] = {'blk': item['blk'], 'floor': int(item['f']), 'stack': item['s']}
+                        st.query_params['target_unit'] = f"{item['blk']}|{item['f']}|{item['s']}"
+                        st.rerun()
+            with c2:
+                st.markdown("##### 🟠 3-6月内解禁 (⚠️)")
+                for item in warm_list:
+                    if st.button(f"{item['label']} ({item['ssd']})", key=f"w_{item['label']}"):
+                        st.session_state.selected_blk = item['blk']
+                        st.session_state['avm_target'] = {'blk': item['blk'], 'floor': int(item['f']), 'stack': item['s']}
+                        st.query_params['target_unit'] = f"{item['blk']}|{item['f']}|{item['s']}"
+                        st.rerun()
+
+    # E. 全局跳转监听
     st.markdown("""<script>
         window.addEventListener('message', function(event) {
             if (event.data.type === 'streamlit:set_component_value' && event.data.key === 'grid_click') {
@@ -163,10 +190,11 @@ def render(df, chart_font_size=12):
         });
     </script>""", unsafe_allow_html=True)
 
-    params = st.query_params
-    if "target_unit" in params:
-        blk, f, s = params["target_unit"].split('|')
+    if "target_unit" in st.query_params:
+        blk, f, s = st.query_params["target_unit"].split('|')
         st.session_state['avm_target'] = {'blk': blk, 'floor': int(f), 'stack': s}
         st.query_params.clear()
         components.html("<script>window.parent.document.querySelectorAll('button[data-baseweb=\"tab\"]')[2].click();</script>", height=0)
         st.rerun()
+
+    st.caption("🔴>6月 | 🟠3-6月 | 🟡0-3月 | 🟢Safe。蓝色按钮为当前选中楼座。")
