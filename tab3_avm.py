@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import time  # [V206 Fix] 补回缺失的 time 模块，解决 NameError
 import io
 import urllib.parse
 import utils_address 
 
-# [V203] 引用 utils.py 中的通用组件，删除重复定义的代码
+# 引用 utils.py 中的通用组件
 from utils import (
     AGENT_PROFILE, 
     CUSTOM_DISCLAIMER, 
@@ -59,7 +60,7 @@ def clean_and_prepare_data(df_raw):
     df['Floor_Int'] = pd.to_numeric(df['Floor'], errors='coerce').fillna(0).astype(int)
     return df
 
-# [V197] 3行紧凑地址格式
+# 3行紧凑地址格式
 def get_address_template(project_name, blk, unit_str):
     """根据 Project + Block 查找地址"""
     try:
