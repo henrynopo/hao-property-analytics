@@ -8,13 +8,11 @@ from dateutil.relativedelta import relativedelta
 
 # --- 0. 核心跳转逻辑 (回调函数) ---
 def go_to_valuation(blk, floor, stack):
-    # 1. 更新目标单位数据
     st.session_state['avm_target'] = {
         'blk': blk,
         'floor': int(floor),
         'stack': stack
     }
-    # 2. 开启跳转开关
     st.session_state['trigger_tab_switch'] = True
 
 # --- 1. 数据清洗与辅助 ---
@@ -67,37 +65,32 @@ def shorten_type(type_str):
 
 # --- 2. 渲染主函数 ---
 def render(df_raw, chart_font_size=12):
-    # [Step 1] 数据清洗与 Block 列表生成 (最优先执行)
     df = clean_data(df_raw)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
-    # [Step 2] 修复 Bug 1: 确保 Session State 在渲染按钮前已初始化
+    # 状态初始化
     if 'selected_blk' not in st.session_state:
         st.session_state.selected_blk = all_blks[0]
     elif st.session_state.selected_blk not in all_blks:
-        # 防止切换数据集后旧 Block 不存在
         st.session_state.selected_blk = all_blks[0]
 
-    # [Step 3] 修复 Bug 2: 强制跳转逻辑
-    # 使用 time.time() 作为 key，强制 Streamlit 认为这是新组件，从而每次都执行 JS
+    # [核心修复] 移除 key 参数，通过改变 HTML 内容(添加时间戳注释)来强制刷新
     if st.session_state.get('trigger_tab_switch', False):
-        js_code = """
+        js_code = f"""
         <script>
-            // 查找所有 Tab 按钮
+            // Timestamp: {time.time()} (Force Re-run)
             var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-            // 假设 Tab 3 是第3个 (索引2)
-            if (tabs.length > 2) {
+            if (tabs.length > 2) {{
                 tabs[2].click();
                 window.parent.scrollTo(0, 0);
-            }
+            }}
         </script>
         """
-        components.html(js_code, height=0, key=f"nav_js_{time.time()}")
-        st.session_state['trigger_tab_switch'] = False # 重置触发器
+        components.html(js_code, height=0) # 移除了 key 参数
+        st.session_state['trigger_tab_switch'] = False
 
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # CSS 样式
     st.markdown("""
         <style>
         div.stButton > button {
@@ -126,7 +119,7 @@ def render(df_raw, chart_font_size=12):
         </style>
     """, unsafe_allow_html=True)
 
-    # [Step 4] 渲染 Block 选择器
+    # Block Selector
     st.write("选择楼座 (Block):")
     cols_per_row = 8
     rows = [all_blks[i:i + cols_per_row] for i in range(0, len(all_blks), cols_per_row)]
@@ -135,13 +128,12 @@ def render(df_raw, chart_font_size=12):
         cols = st.columns(len(row_blks))
         for idx, blk in enumerate(row_blks):
             with cols[idx]:
-                # 此时 selected_blk 已经保证有值且正确，颜色渲染正常
                 b_type = "primary" if st.session_state.selected_blk == blk else "secondary"
                 if st.button(blk, key=f"blk_{blk}", type=b_type, use_container_width=True):
                     st.session_state.selected_blk = blk
                     st.rerun()
 
-    # [Step 5] 渲染单元格
+    # Grid Render
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     
@@ -195,7 +187,6 @@ def render(df_raw, chart_font_size=12):
                     line2_str = " | ".join(line2_parts)
                     label = f"{unit_no}\n{line2_str}"
                     
-                    # 使用回调函数进行状态更新，确保原子性
                     st.button(
                         label, 
                         key=f"btn_{selected_blk}_{f}_{s}", 
