@@ -41,10 +41,15 @@ def natural_key(string_):
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # A. 楼座选择按钮 (高度自适应)
+    # A. 楼座选择 (Python 估算高度，放弃 JS 自适应)
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     if 'selected_blk' not in st.session_state: 
         st.session_state.selected_blk = all_blks[0]
+
+    # 估算高度：假设每行能放 6-7 个按钮（移动端/窄屏保守估计），每行高度 45px
+    # 这样可以确保无论是一行还是三行，容器都足够大，不会遮掩按钮
+    estimated_rows = (len(all_blks) // 6) + 1
+    safe_height = estimated_rows * 50 
 
     blk_options_html = """
     <div id="blk-container" style="display:flex; flex-wrap:wrap; gap:8px; padding:2px;">
@@ -58,16 +63,15 @@ def render(df, chart_font_size=12):
         <div onclick="window.parent.postMessage({{type: 'streamlit:set_component_value', value: '{blk_name}', key: 'blk_click'}}, '*')"
              style="padding: 6px 14px; border-radius: 4px; border: 1px solid {border}; background-color: {bg}; 
                     color: {color}; cursor: pointer; font-size: 13px; font-weight: 600; font-family: sans-serif; 
-                    transition: all 0.2s; margin-bottom: 4px;">{blk_name}</div>
+                    transition: all 0.2s; margin-bottom: 4px; white-space: nowrap;">
+            {blk_name}
+        </div>
         """
+    blk_options_html += '</div>'
+    
+    # 注入交互 JS
     blk_options_html += """
-    </div>
-    <script>
-        function reportBlkHeight() {
-            const h = document.getElementById('blk-container').offsetHeight + 10;
-            window.parent.postMessage({type: 'streamlit:set_height', height: h}, '*');
-        }
-        window.onload = reportBlkHeight; window.onresize = reportBlkHeight;
+        <script>
         window.addEventListener('message', function(event) {
             if (event.data.type === 'streamlit:set_component_value' && event.data.key === 'blk_click') {
                 const url = new URL(window.location);
@@ -75,9 +79,10 @@ def render(df, chart_font_size=12):
                 window.parent.location.search = url.searchParams.toString();
             }
         });
-    </script>
+        </script>
     """
-    components.html(blk_options_html, height=45)
+    # 使用 Python 计算出的安全高度
+    components.html(blk_options_html, height=safe_height, scrolling=False)
 
     if "set_blk" in st.query_params:
         st.session_state.selected_blk = st.query_params["set_blk"]
@@ -94,6 +99,7 @@ def render(df, chart_font_size=12):
     floors = sorted(blk_df['F_Sort'].unique(), reverse=True)
     tx_map = blk_df.sort_values('Sale Date').groupby(['F_Sort', 'Stack']).tail(1).set_index(['F_Sort', 'Stack']).to_dict('index')
 
+    # CSS 增加底部 Padding
     html_grid = f"""
     <style>
         body {{ margin: 0; padding: 0; overflow: hidden; }}
@@ -108,8 +114,7 @@ def render(df, chart_font_size=12):
         .u-pr {{ font-size: 10px; font-weight: 600; color: #374151; margin: 1px 0; }}
         .u-ss {{ font-size: 9px; font-weight: bold; margin: 0; }}
     </style>
-    <div id="grid-content" style="padding-bottom: 20px;">
-        <table class="grid-table">
+    <div id="grid-content" style="padding-bottom: 40px;"> <table class="grid-table">
     """
     for f in floors:
         html_grid += "<tr>"
@@ -129,18 +134,22 @@ def render(df, chart_font_size=12):
             """
         html_grid += "</tr>"
     html_grid += "</table></div>"
+    
+    # 增加高度计算的缓冲值
     html_grid += """<script>
         function updateHeight() {
-            const h = document.getElementById('grid-content').offsetHeight + 25;
+            const h = document.getElementById('grid-content').offsetHeight + 10;
             window.parent.postMessage({type: 'streamlit:set_height', height: h}, '*');
         }
         window.onload = updateHeight; window.onresize = updateHeight;
     </script>"""
-    components.html(html_grid, height=(len(floors) * 70) + 20)
+    
+    # 基础高度 + 额外缓冲
+    components.html(html_grid, height=(len(floors) * 70) + 50)
 
-    # C. SSD 备注 (Legend) - 紧跟网格
+    # C. SSD 备注 (Legend)
     st.markdown("""
-        <div style="display:flex; flex-wrap:wrap; gap:15px; font-size:12px; margin-top:-5px; margin-bottom:15px; color:#4b5563;">
+        <div style="display:flex; flex-wrap:wrap; gap:15px; font-size:12px; margin-top:-20px; margin-bottom:15px; color:#4b5563;">
             <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#fca5a5; border-radius:2px; margin-right:5px;"></div> 🔴 > 6月</div>
             <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#fed7aa; border-radius:2px; margin-right:5px;"></div> 🟠 3-6月</div>
             <div style="display:flex; align-items:center;"><div style="width:12px; height:12px; background:#fef08a; border-radius:2px; margin-right:5px;"></div> 🟡 0-3月</div>
