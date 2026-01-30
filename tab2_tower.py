@@ -6,9 +6,14 @@ import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 2025 最新 SSD 政策逻辑 ---
+# --- 0. 跳转逻辑 ---
+def switch_to_tab_3():
+    js = "<script>window.parent.document.querySelectorAll('button[data-baseweb=\"tab\"]')[2].click();</script>"
+    components.html(js, height=0)
+
+# --- 1. SSD 2025 政策逻辑 ---
 def get_ssd_info(purchase_date):
-    if pd.isna(purchase_date): return "", "#f3f4f6", "#9ca3af" # 灰
+    if pd.isna(purchase_date): return "", "normal"
     if not isinstance(purchase_date, datetime):
         purchase_date = pd.to_datetime(purchase_date)
     
@@ -16,64 +21,89 @@ def get_ssd_info(purchase_date):
     POLICY_2025 = pd.Timestamp("2025-07-04")
     POLICY_2017 = pd.Timestamp("2017-03-11")
     
-    # 判定锁定期
-    if purchase_date >= POLICY_2025:
-        lock_years = 4
-        rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"}
-    else:
-        lock_years = 3
-        rates = {1: "12%", 2: "8%", 3: "4%"}
-        
+    # 判定政策周期
+    is_new_policy = purchase_date >= POLICY_2025
+    lock_years = 4 if is_new_policy else 3
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
     
     if today >= ssd_deadline:
-        return "", "#f0fdf4", "#166534" # Safe: 绿底无字
+        return "", "safe"
 
-    # 计算已持有时长（年）
+    # 计算税率
     diff = relativedelta(today, purchase_date)
-    years_held = diff.years + 1 # 第几年
-    current_rate = rates.get(years_held, "4%")
+    years_held = diff.years + 1
     
+    if is_new_policy:
+        rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"}
+    else:
+        rates = {1: "12%", 2: "8%", 3: "4%"}
+    
+    current_rate = rates.get(years_held, "4%")
     days_left = (ssd_deadline - today).days
     
-    # 颜色与预警逻辑
-    if days_left < 90:
-        return f"🔥 {current_rate} ({days_left}d)", "#fee2e2", "#991b1b" # 3个月内
-    elif days_left < 180:
-        return f"⚠️ {current_rate} ({days_left//30}m)", "#ffedd5", "#9a3412" # 6个月内
-    else:
-        bg = "#fee2e2" if lock_years == 4 else "#fef2f2"
-        return f"{current_rate} SSD", bg, "#991b1b"
+    # 预警标签
+    if days_left < 90: label = f"🔥 {current_rate} ({days_left}d)"
+    elif days_left < 180: label = f"⚠️ {current_rate} ({days_left//30}m)"
+    else: label = f"{current_rate} SSD"
+    
+    return label, "locked"
 
-# --- 2. 辅助函数 ---
+# --- 2. 辅助 ---
 def format_unit(floor, stack):
     return f"#{int(floor):02d}-{str(stack).zfill(2) if str(stack).isdigit() else stack}"
 
-# --- 3. 渲染主函数 ---
+# --- 3. 渲染 ---
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
     
-    # CSS 注入：确保透明按钮 100% 覆盖且可点击
-    st.markdown("""
+    # 💉 注入最强 CSS：重塑 Streamlit 按钮
+    st.markdown(f"""
         <style>
-        [data-testid="column"] { padding: 0 2px !important; }
-        .stButton button {
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 75px !important;
-            background: transparent !important;
-            color: transparent !important;
-            border: none !important;
-            z-index: 10;
-        }
-        .stButton button:hover { background: rgba(0,0,0,0.05) !important; }
+        /* 布局微调 */
+        [data-testid="column"] {{ padding: 0 1px !important; }}
+        
+        /* 核心：重写按钮样式 */
+        div.stButton > button {{
+            width: 100% !important;
+            height: 85px !important;
+            border-radius: 6px !important;
+            border: 1px solid #e5e7eb !important;
+            padding: 5px !important;
+            white-space: pre-wrap !important; /* 强制换行 */
+            line-height: 1.4 !important;
+            display: block !important;
+            font-family: sans-serif !important;
+            transition: all 0.2s !important;
+        }}
+        
+        /* 🔴 SSD Locked (Primary) */
+        div.stButton > button[kind="primary"] {{
+            background-color: #fef2f2 !important;
+            color: #991b1b !important;
+            border-color: #f87171 !important;
+        }}
+        
+        /* 🟢 SSD Safe (Secondary) */
+        div.stButton > button[kind="secondary"] {{
+            background-color: #f0fdf4 !important;
+            color: #166534 !important;
+            border-color: #bbf7d0 !important;
+        }}
+
+        /* ⚪ No Data (We'll use a specific logic for this) */
+        /* 由于 Streamlit 只有两种颜色，我们通过 CSS 过滤掉没字的价格来变灰 */
+        
+        div.stButton > button:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }}
         </style>
     """, unsafe_allow_html=True)
 
     all_blks = sorted(df['BLK'].unique(), key=lambda x: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', str(x))])
-    selected_blk = st.selectbox("选择楼座", all_blks, key="blk_v117")
+    selected_blk = st.selectbox("选择楼座", all_blks, key="blk_v118")
     blk_df = df[df['BLK'] == selected_blk].copy()
     
-    # 处理楼层
     f_col = 'Floor_Num' if 'Floor_Num' in blk_df.columns else 'Floor'
     blk_df['F_Sort'] = pd.to_numeric(blk_df[f_col], errors='coerce').fillna(0).astype(int)
     all_stacks = sorted(blk_df['Stack'].unique(), key=lambda x: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', str(x))])
@@ -90,23 +120,21 @@ def render(df, chart_font_size=12):
                 unit_no = format_unit(f, s)
                 data = tx_map.get((f, s))
                 
-                price_str, ssd_text, bg_color, text_color = "-", "", "#f9fafb", "#9ca3af"
-                
                 if data:
                     price_str = f"${data['Sale Price']/1e6:.2f}M"
-                    ssd_text, bg_color, text_color = get_ssd_info(data['Sale Date'])
+                    ssd_text, status = get_ssd_info(data['Sale Date'])
+                    
+                    # 构造三行内容
+                    # 强制加 \n 配合 pre-wrap
+                    btn_label = f"{unit_no}\n{price_str}\n{ssd_text if ssd_text else ' '}"
+                    btn_type = "primary" if status == "locked" else "secondary"
+                    help_text = f"成交: {data['Sale Date'].strftime('%Y-%m-%d')}"
+                else:
+                    # 无数据单元格
+                    btn_label = f"{unit_no}\n-\n "
+                    btn_type = "secondary"
+                    help_text = "无历史记录"
 
-                # HTML 渲染三行布局
-                st.markdown(f"""
-                    <div style="background-color:{bg_color}; border:1px solid #e5e7eb; border-radius:6px; height:75px; 
-                                display:flex; flex-direction:column; justify-content:center; align-items:center; font-family:sans-serif;">
-                        <div style="font-size:13px; font-weight:800; color:#111827;">{unit_no}</div>
-                        <div style="font-size:12px; font-weight:600; color:#374151; margin:2px 0;">{price_str}</div>
-                        <div style="font-size:10px; font-weight:bold; color:{text_color};">{ssd_text}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-                # 透明按钮处理点击跳转
-                if st.button("", key=f"v117_{selected_blk}_{f}_{s}"):
+                if st.button(btn_label, key=f"v118_{f}_{s}", help=help_text, type=btn_type, use_container_width=True):
                     st.session_state['avm_target'] = {'blk': selected_blk, 'floor': f, 'stack': s}
-                    components.html("<script>window.parent.document.querySelectorAll('button[data-baseweb=\"tab\"]')[2].click();</script>", height=0)
+                    switch_to_tab_3()
