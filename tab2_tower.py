@@ -6,10 +6,10 @@ import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-# --- 1. 核心 SSD 颜色与逻辑修正 ---
+# --- 1. SSD 颜色逻辑 ---
 def get_ssd_status(purchase_date):
     if pd.isna(purchase_date): 
-        return "", "#f9fafb", "#9ca3af" # 灰 (无数据)
+        return "", "#f9fafb", "#9ca3af" # 灰
     if not isinstance(purchase_date, datetime):
         purchase_date = pd.to_datetime(purchase_date)
     
@@ -18,35 +18,31 @@ def get_ssd_status(purchase_date):
     lock_years = 4 if purchase_date >= POLICY_2025 else 3
     ssd_deadline = purchase_date + relativedelta(years=lock_years)
     
-    # 🟢 SSD = 0 (已解禁)
     if today >= ssd_deadline:
-        return "", "#f0fdf4", "#166534" 
+        return "", "#f0fdf4", "#166534" # 绿 (Safe)
 
+    days_left = (ssd_deadline - today).days
     diff = relativedelta(today, purchase_date)
     years_held = diff.years + 1
     rates = {1: "16%", 2: "12%", 3: "8%", 4: "4%"} if lock_years == 4 else {1: "12%", 2: "8%", 3: "4%"}
     rate = rates.get(years_held, "4%")
-    days_left = (ssd_deadline - today).days
     
-    # 🟡 SSD 0-3个月 (黄色)
-    if days_left < 90:
+    if days_left < 90: # 0-3月 (黄)
         return f"🔥{rate}({days_left}d)", "#fef08a", "#854d0e"
-    # 🟠 SSD 3-6个月 (橙色)
-    elif days_left < 180:
+    elif days_left < 180: # 3-6月 (橙)
         return f"⚠️{rate}({days_left//30}m)", "#fed7aa", "#9a3412"
-    # 🔴 SSD > 6个月 (红色)
-    else:
+    else: # > 6月 (红)
         return f"{rate} SSD", "#fca5a5", "#7f1d1d"
 
 def format_unit(floor, stack):
     return f"#{int(floor):02d}-{str(stack).zfill(2) if str(stack).isdigit() else stack}"
 
-# --- 2. 渲染主逻辑 ---
+# --- 2. 渲染函数 ---
 def render(df, chart_font_size=12):
     st.subheader("🏢 楼宇透视 (Building View)")
     
     all_blks = sorted(df['BLK'].unique(), key=lambda x: [int(s) if s.isdigit() else s for s in re.split(r'(\d+)', str(x))])
-    selected_blk = st.selectbox("选择楼座", all_blks, key="blk_v124")
+    selected_blk = st.selectbox("选择楼座", all_blks, key="blk_v126")
     blk_df = df[df['BLK'] == selected_blk].copy()
     
     if blk_df.empty: return
@@ -57,20 +53,40 @@ def render(df, chart_font_size=12):
     floors = sorted(blk_df['F_Sort'].unique(), reverse=True)
     tx_map = blk_df.sort_values('Sale Date').groupby(['F_Sort', 'Stack']).tail(1).set_index(['F_Sort', 'Stack']).to_dict('index')
 
-    # --- HTML 表格构造器 ---
+    # --- HTML 表格构造 ---
     html_grid = f"""
     <style>
-        .grid-table {{ border-collapse: separate; border-spacing: 2px; width: 100%; font-family: sans-serif; }}
-        .unit-btn {{
-            width: 80px; height: 58px; border-radius: 3px; border: 1px solid #e5e7eb;
-            text-align: center; cursor: pointer; transition: all 0.1s;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        .grid-container {{
+            width: 100%;
+            padding-bottom: 30px; /* 关键：增加底部内边距，防止被截断 */
+            overflow-x: auto;
         }}
-        .unit-btn:hover {{ border-color: #4b5563; transform: scale(1.02); }}
+        .grid-table {{ 
+            border-collapse: separate; 
+            border-spacing: 4px; 
+            margin-left: 0;
+            table-layout: fixed;
+        }}
+        .unit-btn {{
+            width: 85px; 
+            height: 60px; 
+            border-radius: 4px; 
+            border: 1px solid #e5e7eb;
+            text-align: center; 
+            cursor: pointer; 
+            display: flex; 
+            flex-direction: column; 
+            justify-content: center; 
+            align-items: center;
+            font-family: sans-serif;
+            transition: transform 0.1s;
+        }}
+        .unit-btn:hover {{ border-color: #4b5563; transform: scale(1.03); z-index: 50; }}
         .u-no {{ font-size: 11px; font-weight: 800; color: #111827; margin: 0; }}
         .u-pr {{ font-size: 10px; font-weight: 600; color: #374151; margin: 1px 0; }}
         .u-ss {{ font-size: 9px; font-weight: bold; margin: 0; }}
     </style>
+    <div class="grid-container">
     <table class="grid-table">
     """
 
@@ -85,7 +101,7 @@ def render(df, chart_font_size=12):
                 p_str = f"${data['Sale Price']/1e6:.1f}M"
                 ssd_txt, bg, tc = get_ssd_status(data['Sale Date'])
 
-            # 点击通过 URL 参数传递信号
+            # 点击回调
             click_js = f"window.parent.postMessage({{type: 'streamlit:set_component_value', value: '{selected_blk}|{f}|{s}', key: 'grid_click'}}, '*')"
             
             html_grid += f"""
@@ -98,12 +114,14 @@ def render(df, chart_font_size=12):
             </td>
             """
         html_grid += "</tr>"
-    html_grid += "</table>"
+    html_grid += "</table></div>"
 
-    # 渲染 HTML
-    components.html(html_grid, height=(len(floors) * 62) + 20)
+    # --- 渲染组件：赋予充足的高度缓冲区 ---
+    # 使用 75 像素每行 + 80 像素的额外空间，确保完全不被遮挡
+    dynamic_height = (len(floors) * 75) + 80
+    components.html(html_grid, height=dynamic_height)
 
-    # 监听点击信号并处理跳转
+    # 捕获跳转信号
     st.markdown("""
         <script>
         window.addEventListener('message', function(event) {
@@ -116,14 +134,12 @@ def render(df, chart_font_size=12):
         </script>
     """, unsafe_allow_html=True)
 
-    # 拦截信号
     params = st.query_params
     if "target_unit" in params:
         blk, f, s = params["target_unit"].split('|')
         st.session_state['avm_target'] = {'blk': blk, 'floor': int(f), 'stack': s}
         st.query_params.clear()
-        # 执行跳转 JS
         components.html("<script>window.parent.document.querySelectorAll('button[data-baseweb=\"tab\"]')[2].click();</script>", height=0)
         st.rerun()
 
-    st.caption("🔴>6月 | 🟠3-6月 | 🟡0-3月 | 🟢Safe。点击格子跳转。")
+    st.caption("🔴>6月 | 🟠3-6月 | 🟡0-3月 | 🟢Safe。表格左对齐，底部已增加缓冲空间。")
