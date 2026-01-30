@@ -1,75 +1,37 @@
 import streamlit as st
 import pandas as pd
-import re
-
-# --- 辅助：统一数据清洗 (与 Tab 3 保持一致) ---
-def clean_and_prepare_data(df_raw):
-    df = df_raw.copy()
-    
-    # 1. 列名映射
-    rename_map = {
-        'Transacted Price ($)': 'Sale Price',
-        'Area (SQFT)': 'Area (sqft)',
-        'Unit Price ($ psf)': 'Unit Price ($ psf)',
-        'Unit Price ($ psm)': 'Unit Price ($ psm)',
-        'Sale Date': 'Sale Date',
-        'Bedroom Type': 'Type',   
-        'No. of Bedroom': 'Type', 
-        'Property Type': 'Type'   
-    }
-    df.rename(columns=rename_map, inplace=True)
-    
-    # 2. 确保列存在
-    if 'Type' not in df.columns:
-        df['Type'] = "N/A"
-        
-    if 'Sale Date' in df.columns:
-        df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
-
-    # 3. 补全尺价
-    if 'Unit Price ($ psf)' not in df.columns:
-        if 'Sale Price' in df.columns and 'Area (sqft)' in df.columns:
-            df['Unit Price ($ psf)'] = df['Sale Price'] / df['Area (sqft)']
-        else:
-            df['Unit Price ($ psf)'] = 0
-            
-    return df
-
-# --- 辅助：格式化单元号 ---
-def format_unit(floor, stack):
-    try:
-        f_num = int(float(floor))
-        s_str = str(stack)
-        s_fmt = s_str.zfill(2) if s_str.isdigit() else s_str
-        return f"#{f_num:02d}-{s_fmt}"
-    except:
-        return f"#{floor}-{stack}"
+from utils import format_unit # [V204] 引用通用工具
 
 # --- 主渲染函数 ---
-def render(df_raw):
+def render(df):
     st.subheader("📜 历年交易详情 (Transaction Details)")
 
-    # 1. 数据清洗
-    df = clean_and_prepare_data(df_raw)
-    
-    # 2. 默认按时间倒序排列
-    df = df.sort_values('Sale Date', ascending=False)
+    # 1. 简单排序 (不再需要重复清洗)
+    if 'Sale Date' in df.columns:
+        df = df.sort_values('Sale Date', ascending=False)
 
-    # 3. 构造显示列
-    # 修改：增加 BLK 前缀
-    df['Unit'] = df.apply(
-        lambda row: f"BLK {row['BLK']} {format_unit(row['Floor'], row['Stack'])}", 
-        axis=1
-    )
+    # 2. 构造显示列
+    # [V204] 使用 utils.format_unit，保持 #01-05 格式统一
+    if 'Unit' not in df.columns:
+        df['Unit'] = df.apply(
+            lambda row: f"BLK {row['BLK']} {format_unit(row['Floor_Num'], row['Stack'])}", 
+            axis=1
+        )
     
-    # 日期格式化
-    df['Sale Date Str'] = df['Sale Date'].dt.strftime('%Y-%m-%d')
+    # 3. 格式化用于显示的列
+    # 注意：不要修改原 df 的数值列，而是创建新的 Str 列用于显示
+    if 'Sale Date' in df.columns:
+        df['Sale Date Str'] = df['Sale Date'].dt.strftime('%Y-%m-%d')
+    else:
+        df['Sale Date Str'] = "-"
+        
+    df['Sale Price Str'] = df['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M" if pd.notnull(x) else "-")
+    df['Unit Price Str'] = df['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "-")
     
-    # 价格格式化
-    df['Sale Price Str'] = df['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M")
-    df['Unit Price Str'] = df['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}")
+    # 4. 筛选显示的列
+    # 确保 'Type' 列存在 (utils.load_data 已处理，但为了保险)
+    if 'Type' not in df.columns: df['Type'] = "N/A"
     
-    # 4. 筛选显示的列 (完全对齐 Tab 3)
     display_cols = ['Sale Date Str', 'Unit', 'Type', 'Area (sqft)', 'Sale Price Str', 'Unit Price Str']
     
     # 5. 渲染表格
