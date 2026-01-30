@@ -52,24 +52,40 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     maisonette_blks = ['10J', '10K', '10L', '10M']
     is_maisonette = target_blk in maisonette_blks
     
+    # 1. 筛选 Comparables
     if is_maisonette:
         comps = df[df['BLK'].isin(maisonette_blks)].copy()
     else:
         comps = df[~df['BLK'].isin(maisonette_blks)].copy()
     
+    # 2. 获取本单位/Stack 的基础信息
     this_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
     
+    # --- 面积修正逻辑 Start ---
     if not this_stack_tx.empty:
+        # 情况A: 本单位有历史交易 -> 直接用
         est_area = this_stack_tx.iloc[0]['Area (sqft)']
+        
+        # 获取最新的属性信息
         latest_rec = this_stack_tx.sort_values('Sale Date', ascending=False).iloc[0]
         info_tenure = str(latest_rec.get('Tenure', '-'))
         info_from = str(latest_rec.get('Tenure From', '-'))
         info_subtype = str(latest_rec.get('Sub Type', '-'))
     else:
-        est_area = recent_comps['Area (sqft)'].median() if 'recent_comps' in locals() else comps['Area (sqft)'].median()
+        # 情况B: 本单位无交易 -> 尝试找同 Stack 的其他楼层 (面积通常相同)
+        # 这一步非常关键，解决了“对不上”的问题
+        same_stack_tx = df[(df['BLK'] == target_blk) & (df['Stack'] == target_stack)]
+        if not same_stack_tx.empty:
+             est_area = same_stack_tx.iloc[0]['Area (sqft)'] # 同Stack 任意一间
+        else:
+            # 情况C: 同 Stack 也没交易 -> 只能用同类户型中位数 (保底)
+            est_area = recent_comps['Area (sqft)'].median() if 'recent_comps' in locals() else comps['Area (sqft)'].median()
+        
+        # 属性信息用众数填充
         info_tenure = comps['Tenure'].mode()[0] if not comps['Tenure'].empty else '-'
         info_from = comps['Tenure From'].mode()[0] if not comps['Tenure From'].empty else '-'
         info_subtype = comps['Sub Type'].mode()[0] if not comps['Sub Type'].empty else '-'
+    # --- 面积修正逻辑 End ---
 
     limit_date = datetime.now() - pd.DateOffset(months=18)
     recent_comps = comps[comps['Sale Date'] >= limit_date].copy()
@@ -102,13 +118,12 @@ def calculate_avm(df, target_blk, target_floor, target_stack):
     
     return est_price, est_psf, extra_info, recent_comps, est_area
 
-# --- 渲染仪表盘 (V162: +/- 10%) ---
+# --- 渲染仪表盘 ---
 def render_gauge(est_psf, font_size=12):
-    # 核心修正：合理区间改为 +/- 10%
+    # 合理区间 +/- 10%
     range_min = est_psf * 0.90
     range_max = est_psf * 1.10
     
-    # 仪表盘总刻度范围扩大到 +/- 20%，以保持美观
     axis_min = est_psf * 0.80
     axis_max = est_psf * 1.20
         
@@ -125,7 +140,6 @@ def render_gauge(est_psf, font_size=12):
             'borderwidth': 2,
             'bordercolor': "#e5e7eb",
             'steps': [
-                # 蓝色区间：精准对应 +/- 10%
                 {'range': [range_min, range_max], 'color': "#2563eb"}, 
                 {'range': [axis_min, range_min], 'color': "#f3f4f6"},
                 {'range': [range_max, axis_max], 'color': "#f3f4f6"}
@@ -146,7 +160,7 @@ def render_gauge(est_psf, font_size=12):
     return fig
 
 # --- 主渲染函数 ---
-def render(df_raw, project_name="Project", chart_font_size=12):
+def render(df_raw, project_name="Braddell View", chart_font_size=12):
     st.subheader("🤖 智能估值 (AVM)")
 
     target = st.session_state.get('avm_target', None)
@@ -163,7 +177,7 @@ def render(df_raw, project_name="Project", chart_font_size=12):
         st.error(f"数据不足，无法评估 {blk} #{floor}-{stack}")
         return
 
-    # 概览卡片
+    # 概览卡片 (增加项目名称)
     info_parts = [f"{int(area):,} sqft"]
     if extra_info['tenure'] != '-': info_parts.append(str(extra_info['tenure']))
     if extra_info['from'] != '-': info_parts.append(f"From {str(extra_info['from'])}")
@@ -172,8 +186,11 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     st.markdown(f"""
     <div style="background-color:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; margin-bottom:20px;">
-        <h3 style="margin:0; color:#1e293b;">BLK {blk} #{int(floor):02d}-{stack}</h3>
-        <p style="margin:5px 0 0 0; color:#64748b; font-size:15px; font-weight:500;">
+        <p style="margin:0 0 5px 0; color:#64748b; font-size:12px; font-weight:bold; letter-spacing:1px; text-transform:uppercase;">
+            {project_name}
+        </p>
+        <h3 style="margin:0; color:#1e293b; font-size:24px;">BLK {blk} #{int(floor):02d}-{stack}</h3>
+        <p style="margin:5px 0 0 0; color:#475569; font-size:15px; font-weight:500;">
             {info_str}
         </p>
     </div>
@@ -181,7 +198,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
 
     c1, c2 = st.columns([1, 1.5])
     
-    # 核心修正：合理区间改为 +/- 10%
     low_bound = est_price * 0.90
     high_bound = est_price * 1.10
     
