@@ -1,12 +1,15 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
+import time # [V211 Fix] 引入 time 模块用于生成动态Key
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from utils import format_unit, natural_key
 
 def go_to_valuation(blk, floor, stack):
+    # 记录跳转目标
     st.session_state['avm_target'] = {'blk': blk, 'floor': int(floor), 'stack': stack}
+    # 开启跳转开关
     st.session_state['trigger_tab_switch'] = True
 
 def calculate_ssd_info(purchase_date):
@@ -38,29 +41,40 @@ def shorten_type(type_str):
 def render(df, chart_font_size=12):
     all_blks = sorted(df['BLK'].unique(), key=natural_key)
     
-    # 初始化选中状态
+    # 1. 初始化 Block 状态
     if 'selected_blk' not in st.session_state or str(st.session_state.selected_blk) not in all_blks:
         st.session_state.selected_blk = str(all_blks[0])
 
-    # 处理 Tab 跳转
+    # 2. [核心修复] 强力跳转逻辑
+    # 只要检测到开关为 True，就注入一段带有【当前时间戳】的 JS
+    # 这样每次渲染内容都不同，强制浏览器重新执行跳转
     if st.session_state.get('trigger_tab_switch', False):
-        components.html("""<script>var tabs=window.parent.document.querySelectorAll('button[data-baseweb="tab"]');if(tabs.length>2){tabs[2].click();window.parent.scrollTo(0,0);}</script>""", height=0)
+        js = f"""
+        <script>
+            // Force Execute Timestamp: {time.time()}
+            var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+            if (tabs.length > 2) {{
+                tabs[2].click();
+                window.parent.scrollTo(0, 0);
+            }}
+        </script>
+        """
+        components.html(js, height=0)
+        # 执行完后关闭开关，等待下一次点击
         st.session_state['trigger_tab_switch'] = False
 
     st.subheader("🏢 楼宇透视 (Building View)")
 
-    # 使用 st.pills (Streamlit 1.39+) 或 st.radio 替代 Button，避免被下方的 CSS 误伤
+    # 3. Block 选择器 (保持您满意的 Radio/Pills 样式)
     try:
         selection = st.pills("选择楼座 (Block):", all_blks, default=st.session_state.selected_blk, key="blk_selector")
     except AttributeError:
-        # 兼容旧版本
         selection = st.radio("选择楼座 (Block):", all_blks, horizontal=True, index=all_blks.index(st.session_state.selected_blk), key="blk_selector")
     
     if selection:
         st.session_state.selected_blk = selection
 
-    # --- [关键回滚] 恢复之前的单元格 CSS 样式 ---
-    # 这段 CSS 专门用于让 Grid 中的 Unit 按钮变得紧凑、显示两行文字
+    # 4. 单元格样式 (保持您满意的紧凑样式)
     st.markdown("""
         <style>
         /* 仅影响此页面后续渲染的普通按钮 */
@@ -69,7 +83,7 @@ def render(df, chart_font_size=12):
             padding: 4px 2px !important;
             font-size: 11px !important; 
             line-height: 1.3 !important;
-            min-height: 55px !important; /* 恢复原来的高度 */
+            min-height: 55px !important; 
             height: auto !important;
             background-color: #ffffff !important;
             border: 1px solid #e5e7eb !important;
@@ -78,7 +92,7 @@ def render(df, chart_font_size=12):
             flex-direction: column;
             justify-content: center;
             align-items: center;
-            white-space: pre-wrap; /* 允许换行 */
+            white-space: pre-wrap; 
         }
         div.stButton > button:hover {
             border-color: #2563eb !important;
@@ -87,7 +101,6 @@ def render(df, chart_font_size=12):
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
             z-index: 10;
         }
-        /* 微调列间距 */
         [data-testid="column"] { padding: 0 2px !important; }
         </style>
     """, unsafe_allow_html=True)
@@ -95,13 +108,11 @@ def render(df, chart_font_size=12):
     selected_blk = st.session_state.selected_blk
     blk_df = df[df['BLK'] == selected_blk].copy()
     all_stacks = sorted(blk_df['Stack'].unique(), key=natural_key)
-    # 处理楼层排序
     floors = sorted(blk_df['Floor_Num'].dropna().unique().astype(int), reverse=True)
     
-    # 交易数据映射
     tx_map = blk_df.sort_values('Sale Date').groupby(['Floor_Num', 'Stack']).tail(1).set_index(['Floor_Num', 'Stack']).to_dict('index')
 
-    # [V209] 恢复推断逻辑
+    # 推断逻辑
     stack_info_map = {}
     for s in all_stacks:
         s_data = blk_df[blk_df['Stack'] == s]
@@ -116,7 +127,6 @@ def render(df, chart_font_size=12):
     st.markdown("---")
     
     # 渲染 Grid
-    # 如果 Stack 太多，分段显示
     chunk_size = 10
     stack_chunks = [all_stacks[i:i + chunk_size] for i in range(0, len(all_stacks), chunk_size)]
 
@@ -131,12 +141,10 @@ def render(df, chart_font_size=12):
                     tx_data = tx_map.get((f, s))
                     
                     if tx_data:
-                        # 有交易记录
                         u_type = shorten_type(str(tx_data.get('Type', '-')))
                         u_area = int(tx_data.get('Area (sqft)', 0))
                         ssd_icon, _, _ = calculate_ssd_info(tx_data['Sale Date'])
                     else:
-                        # [V209] 无交易记录：使用推断数据
                         defaults = stack_info_map.get(s, {})
                         u_type = shorten_type(str(defaults.get('type', '-')))
                         u_area = int(defaults.get('area', 0))
@@ -144,14 +152,10 @@ def render(df, chart_font_size=12):
                     
                     area_str = f"{u_area:,}sf" if u_area > 0 else "-"
                     
-                    # [关键回滚] 恢复之前的 Label 格式逻辑
-                    # Line 1: Unit + SSD Icon
+                    # 组合显示文字 (Label)
                     line1 = unit_no
                     if ssd_icon: line1 += f" {ssd_icon}"
-                    
-                    # Line 2: Type | Area
                     line2 = f"{u_type} | {area_str}"
-                    
                     label = f"{line1}\n{line2}"
                         
                     st.button(label, key=f"btn_{selected_blk}_{f}_{s}", use_container_width=True, on_click=go_to_valuation, args=(selected_blk, f, s))
