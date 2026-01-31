@@ -84,6 +84,8 @@ def render(df, chart_font_size=12):
                     st.button(label, key=f"btn_{selected_blk}_{f}_{s}", use_container_width=True, on_click=go_to_valuation, args=(selected_blk, f, s))
         if len(stack_chunks) > 1: st.divider()
 
+
+    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")
     st.markdown("---")
     
     # [V219 Fix] 恢复全局机会扫描功能
@@ -123,5 +125,3 @@ def render(df, chart_font_size=12):
             if not watch_list: st.caption("暂无")
             for item in watch_list:
                 st.button(item['label'], key=item['key'], help=item['help'], use_container_width=True, on_click=go_to_valuation, args=(item['b'], item['f'], item['s']))
-
-    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")
