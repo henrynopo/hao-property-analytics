@@ -139,82 +139,55 @@ def calculate_market_trend(full_df):
         return max(-0.05, min(0.10, (slope / avg_price) * 365))
     except: return 0.0
 
-# [V209] 恢复库存推定逻辑
 def detect_block_step(blk_df):
     if blk_df.empty: return 1
     unique_stacks = blk_df['Stack'].unique()
     if len(unique_stacks) == 0: return 1
-    votes_simplex = 0
-    votes_maisonette = 0
+    votes_simplex, votes_maisonette = 0, 0
     for stack in unique_stacks:
         stack_df = blk_df[blk_df['Stack'] == stack]
         floors = sorted(stack_df['Floor_Num'].dropna().unique())
         if len(floors) < 2: continue
-        # 检查是否为复式 (只有奇数层或只有偶数层)
         has_odd = any(f % 2 != 0 for f in floors)
         has_even = any(f % 2 == 0 for f in floors)
-        if (has_odd and not has_even) or (not has_odd and has_even):
-            votes_maisonette += 1
-        else:
-            votes_simplex += 1
+        if (has_odd and not has_even) or (not has_odd and has_even): votes_maisonette += 1
+        else: votes_simplex += 1
     return 2 if votes_maisonette > votes_simplex else 1
 
-# [V209] 恢复库存推定逻辑
 def get_stack_start_floor(stack_df, block_min_f, step):
     if step == 1: return block_min_f
     floors = sorted(stack_df['Floor_Num'].dropna().unique())
     if not floors: return block_min_f
-    # 推断复式楼的起始层
     odd_count = sum(1 for f in floors if f % 2 != 0)
     even_count = sum(1 for f in floors if f % 2 == 0)
     is_odd_stack = odd_count > even_count
-    
     start = block_min_f
-    # 确保起始层的奇偶性与该 Stack 的特征一致
     while True:
-        current_is_odd = (start % 2 != 0)
-        if current_is_odd == is_odd_stack:
-            return start
+        if (start % 2 != 0) == is_odd_stack: return start
         start += 1
 
-# [V209] 恢复库存推定逻辑
 def estimate_inventory(df, category_col='Category'):
     if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: return {}
-    if 'Stack' not in df.columns:
-        # 如果没有 Stack 信息，只能按已出现的 Category 计数
-        return df[category_col].value_counts().to_dict()
-
+    if 'Stack' not in df.columns: return df[category_col].value_counts().to_dict()
     df = df.dropna(subset=['Floor_Num']).copy()
     final_totals = {cat: 0 for cat in df[category_col].unique()}
     unique_blocks = df['BLK'].unique()
-    
     for blk in unique_blocks:
         blk_df = df[df['BLK'] == blk]
         step = detect_block_step(blk_df)
-        min_f = int(blk_df['Floor_Num'].min())
+        min_f, max_f = int(blk_df['Floor_Num'].min()), int(blk_df['Floor_Num'].max())
         if min_f < 1: min_f = 1
-        max_f = int(blk_df['Floor_Num'].max())
-        
-        unique_stacks = blk_df['Stack'].unique()
-        for stack in unique_stacks:
+        for stack in blk_df['Stack'].unique():
             stack_df = blk_df[blk_df['Stack'] == stack]
             if not stack_df.empty:
                 dominant_cat = stack_df[category_col].mode()[0]
                 start_f = get_stack_start_floor(stack_df, min_f, step)
-                # 计算理论楼层数
-                theoretical_floors = range(start_f, max_f + 1, step)
-                count_per_stack = len(theoretical_floors)
-                final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + count_per_stack
-
-    # 兜底：确保估算值不小于实际观察值
+                final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + len(range(start_f, max_f + 1, step))
     observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
     for cat in final_totals:
-        if final_totals[cat] < observed_counts.get(cat, 0):
-            final_totals[cat] = observed_counts.get(cat, 0)
-            
+        if final_totals[cat] < observed_counts.get(cat, 0): final_totals[cat] = observed_counts.get(cat, 0)
     return final_totals
 
-# [V209] 恢复动态楼层溢价逻辑
 def get_dynamic_floor_premium(df, category):
     cat_df = df[df['Category'] == category].copy()
     if cat_df.empty: return 0.005
@@ -238,22 +211,63 @@ def get_dynamic_floor_premium(df, category):
     if len(rates) >= 3:
         fitted_rate = float(np.median(rates))
         return max(0.001, min(0.015, fitted_rate))
-    else:
-        return 0.005
+    else: return 0.005
 
-# [V209] 恢复 SSD 状态计算逻辑
+# [V217 Fix] SSD 核心逻辑修复：严格遵守 2025/2017 政策分界
 def calculate_ssd_status(purchase_date):
-    if pd.isna(purchase_date): return 0.0, "", ""
-    now, p_dt = datetime.now(), pd.to_datetime(purchase_date)
-    held_years = (now - p_dt).days / 365.25
-    rate, emoji, text = 0.0, "🟢", "SSD Free"
+    """
+    Returns: rate(float), emoji(str), text(str), months_left(int)
+    """
+    if pd.isna(purchase_date): return 0.0, "", "", 0
+    p_dt = pd.to_datetime(purchase_date)
+    now = datetime.now()
     
-    # 2017年之后，3年期限
-    if p_dt >= datetime(2017, 3, 11):
-        if held_years < 1: rate, emoji, text = 0.12, "🔴", "SSD 12%"
-        elif held_years < 2: rate, emoji, text = 0.08, "🛑", "SSD 8%"
-        elif held_years < 3: rate, emoji, text = 0.04, "🟥", "SSD 4%"
-    return rate, emoji, text
+    # 政策分界线
+    POLICY_2017 = pd.Timestamp("2017-03-11")
+    POLICY_2025 = pd.Timestamp("2025-07-04")
+    
+    # 1. 判断适用政策
+    if p_dt >= POLICY_2025:
+        # [2025 新政] 2025年7月4日及以后：4年期限，16-12-8-4%
+        lock_years = 4
+        # key 是持有满x年 (0表示不满1年)
+        rates_map = {0: 0.16, 1: 0.12, 2: 0.08, 3: 0.04}
+    elif p_dt >= POLICY_2017:
+        # [2017 旧政] 2017-2025：3年期限，12-8-4%
+        lock_years = 3
+        rates_map = {0: 0.12, 1: 0.08, 2: 0.04}
+    else:
+        # [史前政策] 2017之前 (基本都已过期，设为0以免干扰)
+        lock_years = 0
+        rates_map = {}
+
+    # 2. 计算截止日期和剩余时间
+    ssd_deadline = p_dt + relativedelta(years=lock_years)
+    
+    if now >= ssd_deadline:
+        return 0.0, "🟩", "SSD Free", 0
+        
+    days_left = (ssd_deadline - now).days
+    months_left = int(days_left / 30) + 1
+    
+    # 3. 计算当前税率
+    years_held = relativedelta(now, p_dt).years
+    rate = rates_map.get(years_held, 0.0)
+    
+    # 4. 格式化输出
+    pct_text = f"{int(rate*100)}%"
+    
+    # 图标逻辑：高税率用红色，低税率用深红
+    if rate >= 0.12: base_emoji = "⛔"
+    elif rate >= 0.08: base_emoji = "🛑"
+    else: base_emoji = "🟥"
+    
+    # 预警颜色覆盖 (即将解禁的用黄/橙色)
+    if days_left <= 90: emoji = "🟨"   # < 3 个月
+    elif days_left <= 180: emoji = "🟧" # < 6 个月
+    else: emoji = base_emoji
+    
+    return rate, emoji, f"SSD {pct_text}", months_left
 
 # ==================== 5. 共享图表组件 ====================
 
@@ -272,3 +286,18 @@ def render_gauge(est_psf, font_size=12):
     ))
     fig.update_layout(height=150, margin=dict(l=20, r=20, t=10, b=10), paper_bgcolor="rgba(0,0,0,0)", font={'family': "Arial", 'size': 11})
     return fig
+
+def render_transaction_table(df):
+    display_df = df.copy()
+    if 'Sale Date' in display_df.columns:
+        display_df = display_df.sort_values('Sale Date', ascending=False)
+        display_df['Sale Date Str'] = display_df['Sale Date'].dt.strftime('%Y-%m-%d')
+    else: display_df['Sale Date Str'] = "-"
+    if 'Unit' not in display_df.columns:
+        display_df['Unit'] = display_df.apply(lambda row: format_unit(row.get('Floor_Num'), row.get('Stack')), axis=1)
+    display_df['Sale Price Str'] = display_df['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M" if pd.notnull(x) else "-")
+    display_df['Unit Price Str'] = display_df['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "-")
+    type_col = 'Type' if 'Type' in display_df.columns else 'Category'
+    if 'BLK' not in display_df.columns: display_df['BLK'] = "-"
+    cols = ['Sale Date Str', 'BLK', 'Unit', type_col, 'Area (sqft)', 'Sale Price Str', 'Unit Price Str']
+    st.dataframe(display_df[cols], use_container_width=True, hide_index=True, column_config={"Sale Date Str": "日期", "BLK": "楼座", "Unit": "单位", type_col: "户型", "Area (sqft)": "面积 (sqft)", "Sale Price Str": "总价", "Unit Price Str": "尺价 (psf)"})
