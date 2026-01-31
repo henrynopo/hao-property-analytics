@@ -10,7 +10,6 @@ import plotly.graph_objects as go
 
 CUSTOM_DISCLAIMER = "Disclaimer: Estimates (AVM) for reference only. Not certified valuations. Source: URA/Huttons. No warranty on accuracy."
 
-# [V207] 增强版列名映射表
 COLUMN_RENAME_MAP = {
     'Transacted Price ($)': 'Sale Price', 'Sale Price ($)': 'Sale Price', 'Price ($)': 'Sale Price',
     'Area (SQFT)': 'Area (sqft)', 'Area(sqft)': 'Area (sqft)',
@@ -20,7 +19,6 @@ COLUMN_RENAME_MAP = {
     'Tenure': 'Tenure', 'Lease Commencement Date': 'Tenure From', 'Tenure Start Date': 'Tenure From'
 }
 
-# [V207] 健壮的 Agent Profile 加载逻辑
 def get_agent_profile():
     try: raw = dict(st.secrets["agent"])
     except Exception: raw = {}
@@ -129,7 +127,6 @@ def mark_penthouse(df):
 # ==================== 4. 业务逻辑与算法 ====================
 
 def calculate_market_trend(full_df):
-    """计算年化市场增长率"""
     limit_date = datetime.now() - pd.DateOffset(months=36)
     trend_data = full_df[full_df['Sale Date'] >= limit_date].copy()
     if len(trend_data) < 10: return 0.0
@@ -142,11 +139,121 @@ def calculate_market_trend(full_df):
         return max(-0.05, min(0.10, (slope / avg_price) * 365))
     except: return 0.0
 
-def detect_block_step(blk_df): return 1 # (简化占位，保留接口)
-def get_stack_start_floor(stack_df, block_min_f, step): return block_min_f
-def estimate_inventory(df, category_col='Category'): return {}
-def get_dynamic_floor_premium(df, category): return 0.005
-def calculate_ssd_status(purchase_date): return 0.0, "🟢", "SSD Free"
+# [V209] 恢复库存推定逻辑
+def detect_block_step(blk_df):
+    if blk_df.empty: return 1
+    unique_stacks = blk_df['Stack'].unique()
+    if len(unique_stacks) == 0: return 1
+    votes_simplex = 0
+    votes_maisonette = 0
+    for stack in unique_stacks:
+        stack_df = blk_df[blk_df['Stack'] == stack]
+        floors = sorted(stack_df['Floor_Num'].dropna().unique())
+        if len(floors) < 2: continue
+        # 检查是否为复式 (只有奇数层或只有偶数层)
+        has_odd = any(f % 2 != 0 for f in floors)
+        has_even = any(f % 2 == 0 for f in floors)
+        if (has_odd and not has_even) or (not has_odd and has_even):
+            votes_maisonette += 1
+        else:
+            votes_simplex += 1
+    return 2 if votes_maisonette > votes_simplex else 1
+
+# [V209] 恢复库存推定逻辑
+def get_stack_start_floor(stack_df, block_min_f, step):
+    if step == 1: return block_min_f
+    floors = sorted(stack_df['Floor_Num'].dropna().unique())
+    if not floors: return block_min_f
+    # 推断复式楼的起始层
+    odd_count = sum(1 for f in floors if f % 2 != 0)
+    even_count = sum(1 for f in floors if f % 2 == 0)
+    is_odd_stack = odd_count > even_count
+    
+    start = block_min_f
+    # 确保起始层的奇偶性与该 Stack 的特征一致
+    while True:
+        current_is_odd = (start % 2 != 0)
+        if current_is_odd == is_odd_stack:
+            return start
+        start += 1
+
+# [V209] 恢复库存推定逻辑
+def estimate_inventory(df, category_col='Category'):
+    if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: return {}
+    if 'Stack' not in df.columns:
+        # 如果没有 Stack 信息，只能按已出现的 Category 计数
+        return df[category_col].value_counts().to_dict()
+
+    df = df.dropna(subset=['Floor_Num']).copy()
+    final_totals = {cat: 0 for cat in df[category_col].unique()}
+    unique_blocks = df['BLK'].unique()
+    
+    for blk in unique_blocks:
+        blk_df = df[df['BLK'] == blk]
+        step = detect_block_step(blk_df)
+        min_f = int(blk_df['Floor_Num'].min())
+        if min_f < 1: min_f = 1
+        max_f = int(blk_df['Floor_Num'].max())
+        
+        unique_stacks = blk_df['Stack'].unique()
+        for stack in unique_stacks:
+            stack_df = blk_df[blk_df['Stack'] == stack]
+            if not stack_df.empty:
+                dominant_cat = stack_df[category_col].mode()[0]
+                start_f = get_stack_start_floor(stack_df, min_f, step)
+                # 计算理论楼层数
+                theoretical_floors = range(start_f, max_f + 1, step)
+                count_per_stack = len(theoretical_floors)
+                final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + count_per_stack
+
+    # 兜底：确保估算值不小于实际观察值
+    observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
+    for cat in final_totals:
+        if final_totals[cat] < observed_counts.get(cat, 0):
+            final_totals[cat] = observed_counts.get(cat, 0)
+            
+    return final_totals
+
+# [V209] 恢复动态楼层溢价逻辑
+def get_dynamic_floor_premium(df, category):
+    cat_df = df[df['Category'] == category].copy()
+    if cat_df.empty: return 0.005
+    recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
+    recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
+    grouped = recent_df.groupby(['BLK', 'Stack'])
+    rates = []
+    for _, group in grouped:
+        if len(group) < 2: continue
+        recs = group.to_dict('records')
+        for i in range(len(recs)):
+            for j in range(i + 1, len(recs)):
+                r1, r2 = recs[i], recs[j]
+                if abs((r1['Sale Date'] - r2['Sale Date']).days) > 540: continue
+                floor_diff = r1['Floor_Num'] - r2['Floor_Num']
+                if floor_diff == 0: continue
+                if r1['Floor_Num'] > r2['Floor_Num']: high, low, f_delta = r1, r2, floor_diff
+                else: high, low, f_delta = r2, r1, -floor_diff
+                rate = ((high['Sale PSF'] - low['Sale PSF']) / low['Sale PSF']) / f_delta
+                if -0.005 < rate < 0.03: rates.append(rate)
+    if len(rates) >= 3:
+        fitted_rate = float(np.median(rates))
+        return max(0.001, min(0.015, fitted_rate))
+    else:
+        return 0.005
+
+# [V209] 恢复 SSD 状态计算逻辑
+def calculate_ssd_status(purchase_date):
+    if pd.isna(purchase_date): return 0.0, "", ""
+    now, p_dt = datetime.now(), pd.to_datetime(purchase_date)
+    held_years = (now - p_dt).days / 365.25
+    rate, emoji, text = 0.0, "🟢", "SSD Free"
+    
+    # 2017年之后，3年期限
+    if p_dt >= datetime(2017, 3, 11):
+        if held_years < 1: rate, emoji, text = 0.12, "🔴", "SSD 12%"
+        elif held_years < 2: rate, emoji, text = 0.08, "🛑", "SSD 8%"
+        elif held_years < 3: rate, emoji, text = 0.04, "🟥", "SSD 4%"
+    return rate, emoji, text
 
 # ==================== 5. 共享图表组件 ====================
 
