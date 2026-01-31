@@ -6,15 +6,35 @@ def render(df):
     st.subheader("📜 历年交易详情 (Transaction Details)")
 
     # 1. 筛选逻辑
-    with st.expander("🔍 筛选 (Filter)", expanded=False):
+    with st.expander("🔍 筛选 (Filter)", expanded=True): # 默认展开方便点击
         c1, c2 = st.columns(2)
-        all_blks = sorted(df['BLK'].unique())
-        sel_blks = c1.multiselect("楼座 (Block)", all_blks)
         
-        # 兼容 Type 或 Category
+        # --- Block 筛选 (Button Style) ---
+        all_blks = sorted(df['BLK'].unique())
+        try:
+            # 尝试使用新版 pills (按钮样式)
+            sel_blks = c1.pills(
+                "楼座 (Block)", 
+                options=all_blks, 
+                selection_mode="multi", 
+                key="filter_blk_pills"
+            )
+        except AttributeError:
+            # 回退到旧版 multiselect
+            sel_blks = c1.multiselect("楼座 (Block)", all_blks, key="filter_blk_multi")
+        
+        # --- Type 筛选 (Button Style) ---
         type_col = 'Type' if 'Type' in df.columns else 'Category'
         all_types = sorted(df[type_col].unique())
-        sel_types = c2.multiselect("户型 (Type)", all_types)
+        try:
+            sel_types = c2.pills(
+                "户型 (Type)", 
+                options=all_types, 
+                selection_mode="multi", 
+                key="filter_type_pills"
+            )
+        except AttributeError:
+            sel_types = c2.multiselect("户型 (Type)", all_types, key="filter_type_multi")
         
     filtered_df = df.copy()
     if sel_blks: filtered_df = filtered_df[filtered_df['BLK'].isin(sel_blks)]
@@ -30,7 +50,9 @@ def render(df):
         )
     
     # 3. 格式化用于显示的列
-    filtered_df['Sale Date Str'] = filtered_df['Sale Date'].dt.strftime('%Y-%m-%d')
+    if 'Sale Date Str' not in filtered_df.columns:
+        filtered_df['Sale Date Str'] = filtered_df['Sale Date'].dt.strftime('%Y-%m-%d')
+        
     filtered_df['Sale Price Str'] = filtered_df['Sale Price'].apply(lambda x: f"${x/1e6:.2f}M" if pd.notnull(x) else "-")
     filtered_df['Unit Price Str'] = filtered_df['Unit Price ($ psf)'].apply(lambda x: f"${x:,.0f}" if pd.notnull(x) else "-")
     
