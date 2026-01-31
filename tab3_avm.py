@@ -13,8 +13,9 @@ from utils import (
     format_unit, 
     format_unit_masked, 
     render_gauge,
-    render_transaction_table, # [V216] 引入通用表格组件
-    calculate_market_trend 
+    render_transaction_table,
+    calculate_market_trend,
+    calculate_ssd_status # [V218] 引入 SSD 计算函数
 )
 
 # --- ReportLab Imports ---
@@ -26,7 +27,7 @@ from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_RIGHT
 
 # ==========================================
-# 🛠️ AVM 核心逻辑 (保持不变)
+# 🛠️ AVM 核心逻辑
 # ==========================================
 
 def get_address_template(project_name, blk, unit_str):
@@ -130,7 +131,7 @@ def calculate_avm(df, target_blk, target_floor, target_stack, override_area=None
     return est_price, weighted_psf, extra_info, recent_comps, est_area, floor_adj_rate, market_annual_growth, used_threshold
 
 # ==========================================
-# 📄 PDF 生成模块 (保持不变)
+# 📄 PDF 生成模块 (含 SSD 扣除逻辑)
 # ==========================================
 def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price, est_psf, comps_df, mailing_address, recipient_name="Dear Homeowner", last_price=0, last_date=None):
     buffer = io.BytesIO()
@@ -166,13 +167,27 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     elements.append(Paragraph(f"<b>${est_price_m:.2f} Million (${est_psf:,.0f} psf)</b>", highlight_style_main))
     elements.append(Paragraph(f"Valuation Range: ${est_price_m*0.9:.2f}M - ${est_price_m*1.1:.2f}M", highlight_style_sub))
     
+    # [V218 Fix] PDF 中的 SSD 扣除逻辑
     if last_price > 0 and last_date is not None:
-        profit = est_price - last_price
-        profit_pct = (profit / last_price) * 100
+        ssd_rate, _, ssd_txt, _ = calculate_ssd_status(last_date)
+        ssd_val = est_price * ssd_rate
+        
+        gross_profit = est_price - last_price
+        net_profit = gross_profit - ssd_val
+        net_profit_pct = (net_profit / last_price) * 100
+        
         years_held = (datetime.now() - last_date).days / 365.0
-        intro_text = f"Records indicate this unit was last purchased on <b>{last_date.strftime('%d %b %Y')}</b> for <b>${last_price/1e6:.2f}M</b>. Based on our current valuation, your estimated gross capital appreciation is:"
+        buy_date_str = last_date.strftime('%d %b %Y')
+        
+        intro_text = f"Records indicate this unit was last purchased on <b>{buy_date_str}</b> for <b>${last_price/1e6:.2f}M</b>."
+        
+        if ssd_rate > 0:
+            intro_text += f" After accounting for an estimated Seller's Stamp Duty (SSD) of <b>${ssd_val/1e6:.2f}M ({ssd_txt})</b>, your projected net capital appreciation is:"
+        else:
+            intro_text += " Based on our current valuation, your estimated gross capital appreciation is:"
+            
         elements.append(Paragraph(intro_text, styles['Justify']))
-        elements.append(Paragraph(f"<b>+${profit/1e6:.2f} Million ({profit_pct:.1f}%)</b>", styles['ProfitStyle']))
+        elements.append(Paragraph(f"<b>+${net_profit/1e6:.2f} Million ({net_profit_pct:.1f}%)</b>", styles['ProfitStyle']))
         elements.append(Paragraph(f"This represents a significant return over the past {years_held:.1f} years.", styles['Justify'])); elements.append(Spacer(1, 12))
     
     elements.append(Paragraph("<b>Recent Comparable Transactions Used:</b>", styles['Normal'])); elements.append(Spacer(1, 6))
@@ -244,16 +259,35 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     low_bound, high_bound = est_price * 0.90, est_price * 1.10
     with c1:
         st.metric(label="预估总价 (Est. Price)", value=f"${est_price/1e6:,.2f}M")
+        
+        # [V218 Fix] 页面上的 SSD 扣除显示
         last_price = extra_info.get('last_price', 0)
         if last_price > 0:
-            profit = est_price - last_price; profit_pct = (profit / last_price) * 100
-            st.markdown(f"<div style='margin-top:5px; margin-bottom:10px; font-size:14px; color:#15803d; font-weight:bold;'>📈 预计增值: +${profit/1e6:.2f}M ({profit_pct:.1f}%)</div>", unsafe_allow_html=True)
+            last_date = extra_info.get('last_date')
+            ssd_rate, _, ssd_txt, _ = calculate_ssd_status(last_date)
+            ssd_val = est_price * ssd_rate
+            
+            # 计算净利
+            net_profit = (est_price - last_price) - ssd_val
+            net_pct = (net_profit / last_price) * 100
+            
+            if ssd_rate > 0:
+                # 需缴税情况：显示 SSD 扣除项
+                st.markdown(f"""
+                <div style='margin-top:5px; margin-bottom:10px; font-size:13px;'>
+                    <div style='color:#15803d; font-weight:bold; font-size:15px;'>📈 净增值: +${net_profit/1e6:.2f}M ({net_pct:.1f}%)</div>
+                    <div style='color:#991b1b;'>⚠️ 扣除SSD: -${ssd_val/1e6:.2f}M ({ssd_txt})</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # 无需缴税：正常显示
+                st.markdown(f"<div style='margin-top:5px; margin-bottom:10px; font-size:14px; color:#15803d; font-weight:bold;'>📈 预计增值: +${net_profit/1e6:.2f}M ({net_pct:.1f}%)</div>", unsafe_allow_html=True)
+                
         st.markdown(f"<div style='margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;'><strong>合理区间 (+/- 10%):</strong><br>${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M</div>", unsafe_allow_html=True)
     with c2: st.plotly_chart(render_gauge(est_psf, chart_font_size), use_container_width=True, key=f"gauge_{blk}_{floor}_{stack}_{time.time()}")
     st.divider()
 
     st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
-    # [V216 Fix] 调用通用组件渲染
     comps_display = comps.sort_values('Weight', ascending=False).head(5).copy()
     render_transaction_table(comps_display)
 

@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 import time
 from datetime import datetime
-from utils import format_unit, natural_key, calculate_ssd_status # [V217] 引用修正后的SSD函数
+from utils import format_unit, natural_key, calculate_ssd_status 
 
 def go_to_valuation(blk, floor, stack):
     st.session_state['avm_target'] = {'blk': blk, 'floor': int(floor), 'stack': stack}
@@ -72,7 +72,6 @@ def render(df, chart_font_size=12):
                     if tx_data:
                         u_type = shorten_type(str(tx_data.get('Type', '-')))
                         u_area = int(tx_data.get('Area (sqft)', 0))
-                        # [V217] 这里调用新的utils函数，自动应用2025新政
                         _, ssd_icon, _, _ = calculate_ssd_status(tx_data['Sale Date'])
                     else:
                         defaults = stack_info_map.get(s, {})
@@ -86,4 +85,43 @@ def render(df, chart_font_size=12):
         if len(stack_chunks) > 1: st.divider()
 
     st.markdown("---")
-    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4%(满3年) | 🛑 8% | ⛔ ≥12% (1-2年)")
+    
+    # [V219 Fix] 恢复全局机会扫描功能
+    with st.expander("🚀 全局机会扫描 (即将解禁 / Opportunity Scan)", expanded=False):
+        # 筛选最新交易
+        latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor_Num', 'Stack']).tail(1).copy()
+        
+        opp_list, watch_list = [], []
+        
+        for _, row in latest_txs.iterrows():
+            # 使用 utils 计算精确状态
+            _, emoji, _, months = calculate_ssd_status(row['Sale Date'])
+            
+            if emoji in ["🟨", "🟧"]:
+                blk_val, f_val, s_val = row['BLK'], row['Floor_Num'], row['Stack']
+                unit_str = format_unit(f_val, s_val)
+                u_type = shorten_type(str(row.get('Type', '-')))
+                area = int(row.get('Area (sqft)', 0))
+                
+                label = f"{emoji} BLK {blk_val} {unit_str}\n{u_type} | {area}sf"
+                item_key = f"scan_{blk_val}_{f_val}_{s_val}"
+                
+                item_data = {"label": label, "key": item_key, "b": blk_val, "f": f_val, "s": s_val, "help": f"SSD Expires in ~{months} months"}
+                
+                if emoji == "🟨": opp_list.append(item_data)
+                else: watch_list.append(item_data)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### 🟨 0-3 Months Left")
+            if not opp_list: st.caption("暂无")
+            for item in opp_list:
+                st.button(item['label'], key=item['key'], help=item['help'], use_container_width=True, on_click=go_to_valuation, args=(item['b'], item['f'], item['s']))
+        
+        with c2:
+            st.markdown("##### 🟧 3-6 Months Left")
+            if not watch_list: st.caption("暂无")
+            for item in watch_list:
+                st.button(item['label'], key=item['key'], help=item['help'], use_container_width=True, on_click=go_to_valuation, args=(item['b'], item['f'], item['s']))
+
+    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")
