@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
-import time
+import time # [关键] 必须引入 time 模块
 from datetime import datetime
 from utils import format_unit, natural_key, calculate_ssd_status 
 
@@ -21,8 +21,19 @@ def render(df, chart_font_size=12):
     if 'selected_blk' not in st.session_state or str(st.session_state.selected_blk) not in all_blks:
         st.session_state.selected_blk = str(all_blks[0])
 
+    # [V221 Fix] 强制跳转逻辑 (找回了丢失的时间戳注入)
     if st.session_state.get('trigger_tab_switch', False):
-        js = f"""<script>var tabs=window.parent.document.querySelectorAll('button[data-baseweb="tab"]');if(tabs.length>2){{tabs[2].click();window.parent.scrollTo(0, 0);}}</script>"""
+        # 这里的 timestamp 是为了骗过浏览器缓存，强制每次都执行 JS
+        js = f"""
+        <script>
+            // Force Execute Timestamp: {time.time()} 
+            var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+            if (tabs.length > 2) {{
+                tabs[2].click();
+                window.parent.scrollTo(0, 0);
+            }}
+        </script>
+        """
         components.html(js, height=0)
         st.session_state['trigger_tab_switch'] = False
 
@@ -84,30 +95,21 @@ def render(df, chart_font_size=12):
                     st.button(label, key=f"btn_{selected_blk}_{f}_{s}", use_container_width=True, on_click=go_to_valuation, args=(selected_blk, f, s))
         if len(stack_chunks) > 1: st.divider()
 
-
-    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")
     st.markdown("---")
     
-    # [V219 Fix] 恢复全局机会扫描功能
     with st.expander("🚀 全局机会扫描 (即将解禁 / Opportunity Scan)", expanded=False):
-        # 筛选最新交易
         latest_txs = df.sort_values('Sale Date').groupby(['BLK', 'Floor_Num', 'Stack']).tail(1).copy()
-        
         opp_list, watch_list = [], []
         
         for _, row in latest_txs.iterrows():
-            # 使用 utils 计算精确状态
             _, emoji, _, months = calculate_ssd_status(row['Sale Date'])
-            
             if emoji in ["🟨", "🟧"]:
                 blk_val, f_val, s_val = row['BLK'], row['Floor_Num'], row['Stack']
                 unit_str = format_unit(f_val, s_val)
                 u_type = shorten_type(str(row.get('Type', '-')))
                 area = int(row.get('Area (sqft)', 0))
-                
-                label = f"{emoji} BLK {blk_val} {unit_str}\n{u_type} | {area}sf"
-                item_key = f"scan_{blk_val}_{f_val}_{s_val}"
-                
+                label = f"{emoji} BLK {blk_val} {unit_str} | {u_type} | {area}sf"
+                item_key = f"scan_{blk_val}_{f_val}_{s_val}_{time.time()}" # key增加时间戳防止冲突
                 item_data = {"label": label, "key": item_key, "b": blk_val, "f": f_val, "s": s_val, "help": f"SSD Expires in ~{months} months"}
                 
                 if emoji == "🟨": opp_list.append(item_data)
@@ -119,9 +121,10 @@ def render(df, chart_font_size=12):
             if not opp_list: st.caption("暂无")
             for item in opp_list:
                 st.button(item['label'], key=item['key'], help=item['help'], use_container_width=True, on_click=go_to_valuation, args=(item['b'], item['f'], item['s']))
-        
         with c2:
             st.markdown("##### 🟧 3-6 Months Left")
             if not watch_list: st.caption("暂无")
             for item in watch_list:
                 st.button(item['label'], key=item['key'], help=item['help'], use_container_width=True, on_click=go_to_valuation, args=(item['b'], item['f'], item['s']))
+
+    st.info("图例: 🟩 无SSD | 🟨 <3个月 | 🟧 <6个月 | 🟥 4% | 🛑 8% | ⛔ ≥12%")

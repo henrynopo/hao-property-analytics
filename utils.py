@@ -37,12 +37,17 @@ def get_agent_profile():
 
 AGENT_PROFILE = get_agent_profile()
 
+# [V220 Fix] 强制找回手动上传功能
+# 无论 st.secrets 读取结果如何，都确保 "📂 手动上传 CSV" 存在
 try:
     project_config = dict(st.secrets["projects"])
     cleaned_config = {k: (None if v == "None" else v) for k, v in project_config.items()}
     PROJECTS = cleaned_config
 except Exception:
-    PROJECTS = {"📂 手动上传 CSV": None}
+    PROJECTS = {}
+
+if "📂 手动上传 CSV" not in PROJECTS:
+    PROJECTS["📂 手动上传 CSV"] = None
 
 # ==================== 2. 通用格式化工具 ====================
 
@@ -213,58 +218,40 @@ def get_dynamic_floor_premium(df, category):
         return max(0.001, min(0.015, fitted_rate))
     else: return 0.005
 
-# [V217 Fix] SSD 核心逻辑修复：严格遵守 2025/2017 政策分界
+# [V217/V220 Fix] SSD 核心逻辑：严格遵守 2025/2017 政策分界
 def calculate_ssd_status(purchase_date):
-    """
-    Returns: rate(float), emoji(str), text(str), months_left(int)
-    """
+    """Returns: rate(float), emoji(str), text(str), months_left(int)"""
     if pd.isna(purchase_date): return 0.0, "", "", 0
     p_dt = pd.to_datetime(purchase_date)
     now = datetime.now()
     
-    # 政策分界线
     POLICY_2017 = pd.Timestamp("2017-03-11")
     POLICY_2025 = pd.Timestamp("2025-07-04")
     
-    # 1. 判断适用政策
     if p_dt >= POLICY_2025:
-        # [2025 新政] 2025年7月4日及以后：4年期限，16-12-8-4%
-        lock_years = 4
-        # key 是持有满x年 (0表示不满1年)
-        rates_map = {0: 0.16, 1: 0.12, 2: 0.08, 3: 0.04}
+        lock_years = 4; rates_map = {0: 0.16, 1: 0.12, 2: 0.08, 3: 0.04}
     elif p_dt >= POLICY_2017:
-        # [2017 旧政] 2017-2025：3年期限，12-8-4%
-        lock_years = 3
-        rates_map = {0: 0.12, 1: 0.08, 2: 0.04}
+        lock_years = 3; rates_map = {0: 0.12, 1: 0.08, 2: 0.04}
     else:
-        # [史前政策] 2017之前 (基本都已过期，设为0以免干扰)
-        lock_years = 0
-        rates_map = {}
+        lock_years = 0; rates_map = {}
 
-    # 2. 计算截止日期和剩余时间
     ssd_deadline = p_dt + relativedelta(years=lock_years)
     
-    if now >= ssd_deadline:
-        return 0.0, "🟩", "SSD Free", 0
+    if now >= ssd_deadline: return 0.0, "🟩", "SSD Free", 0
         
     days_left = (ssd_deadline - now).days
     months_left = int(days_left / 30) + 1
     
-    # 3. 计算当前税率
     years_held = relativedelta(now, p_dt).years
     rate = rates_map.get(years_held, 0.0)
-    
-    # 4. 格式化输出
     pct_text = f"{int(rate*100)}%"
     
-    # 图标逻辑：高税率用红色，低税率用深红
     if rate >= 0.12: base_emoji = "⛔"
     elif rate >= 0.08: base_emoji = "🛑"
     else: base_emoji = "🟥"
     
-    # 预警颜色覆盖 (即将解禁的用黄/橙色)
-    if days_left <= 90: emoji = "🟨"   # < 3 个月
-    elif days_left <= 180: emoji = "🟧" # < 6 个月
+    if days_left <= 90: emoji = "🟨"   
+    elif days_left <= 180: emoji = "🟧" 
     else: emoji = base_emoji
     
     return rate, emoji, f"SSD {pct_text}", months_left
