@@ -49,29 +49,27 @@ def render(df, chart_font_size=12):
 
     st.subheader("🏢 楼宇透视 (Building View)")
 
-    # [V210 Update] 使用 st.radio 替代 Button，避免被下方的 CSS 误伤，同时提供更好的交互
-    # 尝试使用 st.pills (Streamlit 1.39+)，如果不支持则自动回退到 st.radio
+    # 使用 st.pills (Streamlit 1.39+) 或 st.radio 替代 Button，避免被下方的 CSS 误伤
     try:
         selection = st.pills("选择楼座 (Block):", all_blks, default=st.session_state.selected_blk, key="blk_selector")
     except AttributeError:
-        # 兼容旧版本 Streamlit
+        # 兼容旧版本
         selection = st.radio("选择楼座 (Block):", all_blks, horizontal=True, index=all_blks.index(st.session_state.selected_blk), key="blk_selector")
     
-    # 更新全局状态
     if selection:
         st.session_state.selected_blk = selection
 
-    # --- 单元格样式 (CSS) ---
+    # --- [关键回滚] 恢复之前的单元格 CSS 样式 ---
     # 这段 CSS 专门用于让 Grid 中的 Unit 按钮变得紧凑、显示两行文字
     st.markdown("""
         <style>
         /* 仅影响此页面后续渲染的普通按钮 */
         div.stButton > button {
             width: 100%;
-            padding: 2px 1px !important;
+            padding: 4px 2px !important;
             font-size: 11px !important; 
-            line-height: 1.2 !important;
-            min-height: 50px !important; /* 强制高度，确保整齐 */
+            line-height: 1.3 !important;
+            min-height: 55px !important; /* 恢复原来的高度 */
             height: auto !important;
             background-color: #ffffff !important;
             border: 1px solid #e5e7eb !important;
@@ -86,10 +84,11 @@ def render(df, chart_font_size=12):
             border-color: #2563eb !important;
             background-color: #eff6ff !important;
             transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
             z-index: 10;
         }
         /* 微调列间距 */
-        [data-testid="column"] { padding: 0 1px !important; }
+        [data-testid="column"] { padding: 0 2px !important; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -124,11 +123,6 @@ def render(df, chart_font_size=12):
     for chunk_idx, current_stacks in enumerate(stack_chunks):
         if len(stack_chunks) > 1: st.caption(f"📍 {selected_blk} - Part {chunk_idx + 1}")
         
-        # 表头 (Stacks)
-        cols = st.columns(len(current_stacks))
-        for i, s in enumerate(current_stacks):
-            cols[i].markdown(f"<div style='text-align:center; font-size:12px; font-weight:bold; color:#6b7280; margin-bottom:5px;'>{s}</div>", unsafe_allow_html=True)
-
         for f in floors:
             cols = st.columns(len(current_stacks))
             for i, s in enumerate(current_stacks):
@@ -148,18 +142,19 @@ def render(df, chart_font_size=12):
                         u_area = int(defaults.get('area', 0))
                         ssd_icon = "" 
                     
-                    area_str = f"{u_area:,}" if u_area > 0 else "-"
+                    area_str = f"{u_area:,}sf" if u_area > 0 else "-"
                     
-                    # 组合显示文字 (Unit \n Type | Area)
-                    if ssd_icon:
-                        label = f"{f:02d} {ssd_icon}\n{u_type}"
-                    else:
-                        label = f"{f:02d}\n{u_type}"
+                    # [关键回滚] 恢复之前的 Label 格式逻辑
+                    # Line 1: Unit + SSD Icon
+                    line1 = unit_no
+                    if ssd_icon: line1 += f" {ssd_icon}"
+                    
+                    # Line 2: Type | Area
+                    line2 = f"{u_type} | {area_str}"
+                    
+                    label = f"{line1}\n{line2}"
                         
-                    # 提示文字包含更多信息
-                    help_txt = f"Unit: {unit_no}\nArea: {area_str} sqft"
-                        
-                    st.button(label, key=f"btn_{selected_blk}_{f}_{s}", help=help_txt, use_container_width=True, on_click=go_to_valuation, args=(selected_blk, f, s))
+                    st.button(label, key=f"btn_{selected_blk}_{f}_{s}", use_container_width=True, on_click=go_to_valuation, args=(selected_blk, f, s))
         
         if len(stack_chunks) > 1: st.divider()
 
