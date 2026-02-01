@@ -5,21 +5,18 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
-# [V235 Fix] 还原 KPI Card 样式为居中/浅灰背景/边框风格
+# [V236 Fix]
+# 1. 修复 KeyError: 聚合后强制重命名列为 ['Period', 'Avg PSF', 'Volume']
+# 2. 修复 Widget Error: 升级 Key 至 v236，且 Date Input 完全由 Session State 驱动
+# 3. 保持 V235 的 UI 样式
+
 def kpi_card(label, value, secondary="", color="blue"):
-    # 颜色映射：根据业务逻辑映射文字颜色
     text_colors = {
-        "blue": "#111827",  # 默认深灰/黑
-        "green": "#16a34a", # 绿色 (盈利)
-        "red": "#dc2626",   # 红色 (亏损)
-        "gray": "#6b7280"   # 灰色
+        "blue": "#111827", "green": "#16a34a", "red": "#dc2626", "gray": "#6b7280"
     }
     text_color = text_colors.get(color, "#111827")
-    
-    # 辅助文字 HTML
     sub_html = f'<div style="font-size: 11px; color: #9ca3af; margin-top: 4px;">{secondary}</div>' if secondary else ''
     
-    # [User Requested Style]
     return f"""
     <div style="background-color: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; text-align: center; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center;">
         <div style="font-size: 13px; color: #6b7280; margin-bottom: 4px; font-weight: 500;">{label}</div>
@@ -38,14 +35,14 @@ def render(df, chart_color="#2563eb", chart_font_size=12, inventory_map=None):
             st.error(f"数据缺少必要列: {col}，无法生成报告。")
             return
 
-    # 1. 初始化 Session State
+    # 1. 初始化 Session State (使用 v236 新 Key 隔离旧缓存)
     min_db_date = df['Sale Date'].min().date()
     max_db_date = df['Sale Date'].max().date()
 
-    if "mkt_start_v235" not in st.session_state: 
-        st.session_state.mkt_start_v235 = min_db_date
-    if "mkt_end_v235" not in st.session_state: 
-        st.session_state.mkt_end_v235 = max_db_date
+    if "mkt_start_v236" not in st.session_state: 
+        st.session_state.mkt_start_v236 = min_db_date
+    if "mkt_end_v236" not in st.session_state: 
+        st.session_state.mkt_end_v236 = max_db_date
 
     # 2. 宏观 KPI (Project Basics)
     total_units = df['Unit_ID'].nunique() if 'Unit_ID' in df.columns else len(df)
@@ -63,7 +60,7 @@ def render(df, chart_color="#2563eb", chart_font_size=12, inventory_map=None):
     # 3. 筛选与设置 (Filters)
     with st.expander("🛠️ 筛选与设置 (Filters & Settings)", expanded=True):
         def apply_preset():
-            preset = st.session_state.get("mkt_preset_selector_v235")
+            preset = st.session_state.get("mkt_preset_selector_v236")
             target_end = max_db_date
             
             if preset == "全部 (All)": target_start = min_db_date
@@ -77,23 +74,25 @@ def render(df, chart_color="#2563eb", chart_font_size=12, inventory_map=None):
 
             if target_start < min_db_date: target_start = min_db_date
             
-            st.session_state.mkt_start_v235 = target_start
-            st.session_state.mkt_end_v235 = target_end
+            # 直接更新 State，不操作 Widget Value
+            st.session_state.mkt_start_v236 = target_start
+            st.session_state.mkt_end_v236 = target_end
 
         c_top1, c_top2 = st.columns([1, 2])
         with c_top1:
-            freq_mode = st.radio("时间维度:", ["Yearly (年)", "Quarterly (季)", "Monthly (月)"], index=0, horizontal=True, key="tab1_freq_mode_v235")
+            freq_mode = st.radio("时间维度:", ["Yearly (年)", "Quarterly (季)", "Monthly (月)"], index=0, horizontal=True, key="tab1_freq_mode_v236")
         with c_top2:
             preset_options = ["全部 (All)", "近6个月", "近1年", "近2年", "近3年", "近5年", "近10年"]
-            try: st.pills("📅 快速选择:", preset_options, selection_mode="single", key="mkt_preset_selector_v235", on_change=apply_preset)
-            except AttributeError: st.selectbox("📅 快速选择:", preset_options, index=0, key="mkt_preset_selector_v235", on_change=apply_preset)
+            try: st.pills("📅 快速选择:", preset_options, selection_mode="single", key="mkt_preset_selector_v236", on_change=apply_preset)
+            except AttributeError: st.selectbox("📅 快速选择:", preset_options, index=0, key="mkt_preset_selector_v236", on_change=apply_preset)
 
         c_d1, c_d2 = st.columns(2)
-        with c_d1: st.date_input("开始日期:", min_value=min_db_date, max_value=max_db_date, key="mkt_start_v235")
-        with c_d2: st.date_input("结束日期:", min_value=min_db_date, max_value=max_db_date, key="mkt_end_v235")
+        # 关键：不传 value 参数，完全依赖 key 对应的 session_state
+        with c_d1: st.date_input("开始日期:", min_value=min_db_date, max_value=max_db_date, key="mkt_start_v236")
+        with c_d2: st.date_input("结束日期:", min_value=min_db_date, max_value=max_db_date, key="mkt_end_v236")
 
-    start_date = st.session_state.mkt_start_v235
-    end_date = st.session_state.mkt_end_v235
+    start_date = st.session_state.mkt_start_v236
+    end_date = st.session_state.mkt_end_v236
 
     if start_date > end_date: 
         st.error("开始日期不能晚于结束日期")
@@ -111,13 +110,15 @@ def render(df, chart_color="#2563eb", chart_font_size=12, inventory_map=None):
     elif "Quarterly" in freq_mode: group_col, x_label = filtered_df['Sale Date'].dt.to_period("Q").astype(str), "Quarter"
     else: group_col, x_label = filtered_df['Sale Date'].dt.to_period("M").astype(str), "Month"
 
+    # [V236 Fix] 聚合后直接重命名列，确保 KeyError 彻底消失
     trend_data = filtered_df.groupby(group_col).agg(
-        Avg_PSF=('Unit Price ($ psf)', 'mean'),
-        Volume=('Unit Price ($ psf)', 'count')
+        Temp_Mean=('Unit Price ($ psf)', 'mean'),
+        Temp_Count=('Unit Price ($ psf)', 'count')
     ).reset_index()
     
-    if not trend_data.empty: trend_data.rename(columns={trend_data.columns[0]: 'Period'}, inplace=True)
-    if 'Period' not in trend_data.columns: trend_data['Period'] = trend_data.index.astype(str)
+    # 强制重命名为标准列名
+    trend_data.columns = ['Period', 'Avg PSF', 'Volume']
+    trend_data['Period'] = trend_data['Period'].astype(str)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=trend_data['Period'], y=trend_data['Volume'], name="Volume", marker_color='#94a3b8', opacity=0.5, yaxis='y2'))
