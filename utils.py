@@ -10,12 +10,34 @@ import plotly.graph_objects as go
 
 CUSTOM_DISCLAIMER = "Disclaimer: Estimates (AVM) for reference only. Not certified valuations. Source: URA/Huttons. No warranty on accuracy."
 
+# [V222 Fix] 超级兼容列名映射表 (覆盖常见的 CSV 变体)
 COLUMN_RENAME_MAP = {
-    'Transacted Price ($)': 'Sale Price', 'Sale Price ($)': 'Sale Price', 'Price ($)': 'Sale Price',
-    'Area (SQFT)': 'Area (sqft)', 'Area(sqft)': 'Area (sqft)',
-    'Unit Price ($ psf)': 'Unit Price ($ psf)', 'Sale PSF': 'Unit Price ($ psf)', 'Unit Price ($ psm)': 'Unit Price ($ psm)',
-    'Sale Date': 'Sale Date', 'Date of Sale': 'Sale Date',
-    'Bedroom Type': 'Type', 'No. of Bedroom': 'Type', 'Property Type': 'Sub Type', 'Building Type': 'Sub Type',
+    # 价格类
+    'Transacted Price ($)': 'Sale Price', 'Sale Price ($)': 'Sale Price', 'Price ($)': 'Sale Price', 'Price': 'Sale Price', 'Transacted Price': 'Sale Price',
+    
+    # 面积类
+    'Area (SQFT)': 'Area (sqft)', 'Area(sqft)': 'Area (sqft)', 'Area (sqm)': 'Area (sqm)', 'Land Area (SQFT)': 'Area (sqft)',
+    
+    # 单价类
+    'Unit Price ($ psf)': 'Unit Price ($ psf)', 'Sale PSF': 'Unit Price ($ psf)', 'Unit Price ($ psm)': 'Unit Price ($ psm)', 'PSF': 'Unit Price ($ psf)',
+    
+    # 日期类
+    'Sale Date': 'Sale Date', 'Date of Sale': 'Sale Date', 'Contract Date': 'Sale Date', 'Date': 'Sale Date',
+    
+    # 楼座 Block (解决 KeyError: 'BLK')
+    'Block': 'BLK', 'Blk': 'BLK', 'BLOCK': 'BLK', 'House No': 'BLK',
+    
+    # 楼层 Floor
+    'Floor': 'Floor', 'Storey': 'Floor', 'Level': 'Floor', 'Floor Level': 'Floor',
+    
+    # 单元号/Stack
+    'Stack': 'Stack', 'Unit Number': 'Stack', 'Unit': 'Stack', # 若 Unit 是完整号，后续会拆分
+    
+    # 户型/属性
+    'Bedroom Type': 'Type', 'No. of Bedroom': 'Type', 'Bedrooms': 'Type',
+    'Property Type': 'Sub Type', 'Building Type': 'Sub Type', 'Type': 'Type',
+    
+    # 地契
     'Tenure': 'Tenure', 'Lease Commencement Date': 'Tenure From', 'Tenure Start Date': 'Tenure From'
 }
 
@@ -37,8 +59,7 @@ def get_agent_profile():
 
 AGENT_PROFILE = get_agent_profile()
 
-# [V220 Fix] 强制找回手动上传功能
-# 无论 st.secrets 读取结果如何，都确保 "📂 手动上传 CSV" 存在
+# 强制保留手动上传入口
 try:
     project_config = dict(st.secrets["projects"])
     cleaned_config = {k: (None if v == "None" else v) for k, v in project_config.items()}
@@ -76,52 +97,78 @@ def format_unit_masked(floor):
 @st.cache_data(ttl=300)
 def load_data(file_or_url):
     try:
+        # 1. 智能读取 (支持传文件对象或路径)
         if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
         try:
+            # 探测表头：只要包含常见列名之一，就认定为 Header
             df_temp = pd.read_csv(file_or_url, header=None, nrows=20)
             header_row = -1
+            keywords = ["Sale Date", "Date of Sale", "BLK", "Block", "Transacted Price", "Sale Price", "Price"]
+            
             for i, row in df_temp.iterrows():
                 row_str = row.astype(str).str.cat(sep=',')
-                if "Sale Date" in row_str or "BLK" in row_str or "Transacted Price" in row_str:
+                if any(k in row_str for k in keywords):
                     header_row = i; break
+            
             if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
             df = pd.read_csv(file_or_url, header=header_row if header_row != -1 else 0)
         except:
             if hasattr(file_or_url, 'seek'): file_or_url.seek(0)
             df = pd.read_csv(file_or_url)
 
+        # 2. 标准化列名
         df.columns = df.columns.str.strip()
         df.rename(columns=COLUMN_RENAME_MAP, inplace=True)
         
+        # 3. 清洗数值列
         for col in ['Sale Price', 'Unit Price ($ psf)', 'Area (sqft)']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace(r'[$,]', '', regex=True)
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
+        # 4. 清洗日期
         if 'Sale Date' in df.columns:
             df['Sale Date'] = pd.to_datetime(df['Sale Date'], errors='coerce')
             df['Sale Year'] = df['Sale Date'].dt.year
             df['Date_Ordinal'] = df['Sale Date'].map(datetime.toordinal)
 
+        # 5. 清洗核心字段 (Block/Stack/Floor)
         if 'BLK' in df.columns: df['BLK'] = df['BLK'].astype(str).str.strip()
         if 'Stack' in df.columns: df['Stack'] = df['Stack'].astype(str).str.strip()
-        if 'Floor' in df.columns: df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
         
+        # [增强] 处理 Floor 可能是 "01-05" 这种范围格式的情况
+        if 'Floor' in df.columns: 
+            # 尝试直接转数字，如果失败(如范围)，则取第一部分
+            df['Floor_Num'] = pd.to_numeric(df['Floor'], errors='coerce')
+            # 修复那些变成 NaN 的范围数据 (例如 "02 to 05")
+            mask_nan = df['Floor_Num'].isna() & df['Floor'].notna()
+            if mask_nan.any():
+                def extract_floor(val):
+                    try: return int(re.search(r'\d+', str(val)).group())
+                    except: return np.nan
+                df.loc[mask_nan, 'Floor_Num'] = df.loc[mask_nan, 'Floor'].apply(extract_floor)
+
+        # 补全缺失列
         for col in ['Type', 'Tenure', 'Tenure From', 'Sub Type']:
             if col not in df.columns: df[col] = "N/A"
 
+        # 6. 生成 Unit (如果缺失 Stack，尝试从 Unit 拆分?)
+        # 暂时保持简单，如果都有才生成
         if 'Stack' in df.columns and 'Floor_Num' in df.columns:
             df['Unit'] = df.apply(lambda row: format_unit(row['Floor_Num'], row['Stack']), axis=1)
             df['Unit_ID'] = df['BLK'].astype(str) + "-" + df['Stack'].astype(str) + "-" + df['Floor_Num'].astype(str)
+            
         return df
-    except Exception: return None
+    except Exception as e:
+        # st.error(f"Data Load Error: {str(e)}")
+        return None
 
 def auto_categorize(df, method):
     if method == "按卧室数量 (Bedroom Type)":
         target_cols = ['Type', 'Bedroom Type', 'Bedrooms']
         found = next((c for c in df.columns if c in target_cols), None)
         return df[found].astype(str).str.strip().str.upper() if found else pd.Series(["Unknown"] * len(df))
-    elif method == "按楼座 (Block)": return df['BLK']
+    elif method == "按楼座 (Block)": return df['BLK'] if 'BLK' in df.columns else pd.Series(["Unknown"] * len(df))
     else: return df['Area (sqft)'].apply(lambda x: "Small" if x<800 else "Medium" if x<1200 else "Large" if x<1600 else "X-Large" if x<2500 else "Giant")
 
 def mark_penthouse(df):
@@ -146,6 +193,9 @@ def calculate_market_trend(full_df):
 
 def detect_block_step(blk_df):
     if blk_df.empty: return 1
+    # 如果没有 Stack 列，无法判断复式，默认1
+    if 'Stack' not in blk_df.columns: return 1
+    
     unique_stacks = blk_df['Stack'].unique()
     if len(unique_stacks) == 0: return 1
     votes_simplex, votes_maisonette = 0, 0
@@ -172,22 +222,32 @@ def get_stack_start_floor(stack_df, block_min_f, step):
         start += 1
 
 def estimate_inventory(df, category_col='Category'):
-    if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: return {}
+    # 必须有 BLK 和 Floor_Num 才能估算，否则直接返回当前统计
+    if 'BLK' not in df.columns or 'Floor_Num' not in df.columns: 
+        return df[category_col].value_counts().to_dict() if category_col in df.columns else {}
+        
     if 'Stack' not in df.columns: return df[category_col].value_counts().to_dict()
+    
     df = df.dropna(subset=['Floor_Num']).copy()
     final_totals = {cat: 0 for cat in df[category_col].unique()}
     unique_blocks = df['BLK'].unique()
+    
     for blk in unique_blocks:
         blk_df = df[df['BLK'] == blk]
         step = detect_block_step(blk_df)
+        
+        # 安全获取最小最大楼层
+        if blk_df['Floor_Num'].empty: continue
         min_f, max_f = int(blk_df['Floor_Num'].min()), int(blk_df['Floor_Num'].max())
         if min_f < 1: min_f = 1
+        
         for stack in blk_df['Stack'].unique():
             stack_df = blk_df[blk_df['Stack'] == stack]
             if not stack_df.empty:
                 dominant_cat = stack_df[category_col].mode()[0]
                 start_f = get_stack_start_floor(stack_df, min_f, step)
                 final_totals[dominant_cat] = final_totals.get(dominant_cat, 0) + len(range(start_f, max_f + 1, step))
+                
     observed_counts = df.groupby(category_col)['Unit_ID'].nunique().to_dict()
     for cat in final_totals:
         if final_totals[cat] < observed_counts.get(cat, 0): final_totals[cat] = observed_counts.get(cat, 0)
@@ -198,6 +258,9 @@ def get_dynamic_floor_premium(df, category):
     if cat_df.empty: return 0.005
     recent_limit = cat_df['Sale Date'].max() - timedelta(days=365*5)
     recent_df = cat_df[cat_df['Sale Date'] >= recent_limit]
+    # 必须有 Stack 才能计算垂直溢价
+    if 'Stack' not in recent_df.columns: return 0.005
+    
     grouped = recent_df.groupby(['BLK', 'Stack'])
     rates = []
     for _, group in grouped:
@@ -218,7 +281,6 @@ def get_dynamic_floor_premium(df, category):
         return max(0.001, min(0.015, fitted_rate))
     else: return 0.005
 
-# [V217/V220 Fix] SSD 核心逻辑：严格遵守 2025/2017 政策分界
 def calculate_ssd_status(purchase_date):
     """Returns: rate(float), emoji(str), text(str), months_left(int)"""
     if pd.isna(purchase_date): return 0.0, "", "", 0
