@@ -15,7 +15,7 @@ from utils import (
     render_gauge,
     render_transaction_table,
     calculate_market_trend,
-    calculate_ssd_status # [V218] 引入 SSD 计算函数
+    calculate_ssd_status
 )
 
 # --- ReportLab Imports ---
@@ -167,7 +167,6 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     elements.append(Paragraph(f"<b>${est_price_m:.2f} Million (${est_psf:,.0f} psf)</b>", highlight_style_main))
     elements.append(Paragraph(f"Valuation Range: ${est_price_m*0.9:.2f}M - ${est_price_m*1.1:.2f}M", highlight_style_sub))
     
-    # [V218 Fix] PDF 中的 SSD 扣除逻辑
     if last_price > 0 and last_date is not None:
         ssd_rate, _, ssd_txt, _ = calculate_ssd_status(last_date)
         ssd_val = est_price * ssd_rate
@@ -260,19 +259,16 @@ def render(df_raw, project_name="Project", chart_font_size=12):
     with c1:
         st.metric(label="预估总价 (Est. Price)", value=f"${est_price/1e6:,.2f}M")
         
-        # [V218 Fix] 页面上的 SSD 扣除显示
         last_price = extra_info.get('last_price', 0)
         if last_price > 0:
             last_date = extra_info.get('last_date')
             ssd_rate, _, ssd_txt, _ = calculate_ssd_status(last_date)
             ssd_val = est_price * ssd_rate
             
-            # 计算净利
             net_profit = (est_price - last_price) - ssd_val
             net_pct = (net_profit / last_price) * 100
             
             if ssd_rate > 0:
-                # 需缴税情况：显示 SSD 扣除项
                 st.markdown(f"""
                 <div style='margin-top:5px; margin-bottom:10px; font-size:13px;'>
                     <div style='color:#15803d; font-weight:bold; font-size:15px;'>📈 净增值: +${net_profit/1e6:.2f}M ({net_pct:.1f}%)</div>
@@ -280,12 +276,28 @@ def render(df_raw, project_name="Project", chart_font_size=12):
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                # 无需缴税：正常显示
                 st.markdown(f"<div style='margin-top:5px; margin-bottom:10px; font-size:14px; color:#15803d; font-weight:bold;'>📈 预计增值: +${net_profit/1e6:.2f}M ({net_pct:.1f}%)</div>", unsafe_allow_html=True)
                 
         st.markdown(f"<div style='margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;'><strong>合理区间 (+/- 10%):</strong><br>${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M</div>", unsafe_allow_html=True)
     with c2: st.plotly_chart(render_gauge(est_psf, chart_font_size), use_container_width=True, key=f"gauge_{blk}_{floor}_{stack}_{time.time()}")
     st.divider()
+
+    # [V224 Add] 新增：该单元历史交易记录
+    df_temp = df.copy()
+    # 确保类型匹配
+    df_temp['Floor_Int'] = pd.to_numeric(df_temp['Floor_Num'], errors='coerce').fillna(0).astype(int)
+    target_floor_int = int(floor)
+    
+    unit_history = df_temp[
+        (df_temp['BLK'] == blk) & 
+        (df_temp['Stack'] == stack) & 
+        (df_temp['Floor_Int'] == target_floor_int)
+    ].copy()
+    
+    if not unit_history.empty:
+        st.markdown("#### 📜 该单元历史交易 (Unit Transaction History)")
+        render_transaction_table(unit_history)
+        st.divider()
 
     st.markdown("#### 🏘️ 参考交易 (Comparable Transactions)")
     comps_display = comps.sort_values('Weight', ascending=False).head(5).copy()
