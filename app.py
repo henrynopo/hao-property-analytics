@@ -93,7 +93,7 @@ if df is not None:
     
     with t1: tab1_market.render(df, chart_color, chart_font_size, inventory_map)
     with t2: tab2_tower.render(df, chart_font_size)
-    with t3: tab3_avm.render(df, project_name, chart_font_size)
+    with t3: tab3_avm.render(df, project_name, chart_font_size, chart_color=chart_color)
     with t4: tab4_history.render(df)
     with t5: tab5_settings.render() # [新增]
 

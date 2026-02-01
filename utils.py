@@ -308,20 +308,46 @@ def calculate_ssd_status(purchase_date):
 
 # ==================== 5. 共享图表组件 ====================
 
-def render_gauge(est_psf, font_size=12):
+# [V237 Update] 支持自定义颜色 color
+def render_gauge(est_psf, font_size=12, color="#2563eb"):
     range_min, range_max = est_psf * 0.90, est_psf * 1.10
     axis_min, axis_max = est_psf * 0.80, est_psf * 1.20
+    
+    number_size = int(font_size * 1.5) 
+    
     fig = go.Figure(go.Indicator(
-        mode = "gauge+number", value = est_psf, number = {'suffix': " psf", 'font': {'size': 18}}, 
+        mode = "gauge+number", 
+        value = est_psf, 
+        number = {'suffix': " psf", 'font': {'size': number_size, 'color': color}}, # [修改] 数字颜色随动
         domain = {'x': [0, 1], 'y': [0, 1]},
         gauge = {
-            'axis': {'range': [axis_min, axis_max], 'tickwidth': 1, 'tickcolor': "darkblue", 'tickmode': 'array', 'tickvals': [axis_min, est_psf, axis_max], 'ticktext': [f"{int(axis_min)}", f"{int(est_psf)}", f"{int(axis_max)}"]},
-            'bar': {'thickness': 0}, 'bgcolor': "white", 'borderwidth': 2, 'bordercolor': "#e5e7eb",
-            'steps': [{'range': [axis_min, range_min], 'color': "#f3f4f6"}, {'range': [range_min, range_max], 'color': "#2563eb"}, {'range': [range_max, axis_max], 'color': "#f3f4f6"}],
+            'axis': {
+                'range': [axis_min, axis_max], 
+                'tickwidth': 1, 
+                'tickcolor': color, # [修改] 刻度颜色
+                'tickmode': 'array', 
+                'tickvals': [axis_min, est_psf, axis_max], 
+                'ticktext': [f"{int(axis_min)}", f"{int(est_psf)}", f"{int(axis_max)}"],
+                'tickfont': {'size': font_size, 'color': color} # [修改] 刻度字色
+            },
+            'bar': {'thickness': 0}, 
+            'bgcolor': "white", 
+            'borderwidth': 2, 
+            'bordercolor': "#e5e7eb",
+            'steps': [
+                {'range': [axis_min, range_min], 'color': "#f3f4f6"}, 
+                {'range': [range_min, range_max], 'color': color}, # [修改] 中间核心区间颜色
+                {'range': [range_max, axis_max], 'color': "#f3f4f6"}
+            ],
             'threshold': {'line': {'color': "#dc2626", 'width': 3}, 'thickness': 0.8, 'value': est_psf}
         }
     ))
-    fig.update_layout(height=150, margin=dict(l=20, r=20, t=10, b=10), paper_bgcolor="rgba(0,0,0,0)", font={'family': "Arial", 'size': 11})
+    fig.update_layout(
+        height=150, 
+        margin=dict(l=20, r=20, t=10, b=10), 
+        paper_bgcolor="rgba(0,0,0,0)", 
+        font={'family': "Arial", 'size': font_size}
+    )
     return fig
 
 def render_transaction_table(df):

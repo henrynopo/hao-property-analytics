@@ -18,17 +18,15 @@ from utils import (
     calculate_ssd_status
 )
 
-# --- ReportLab Imports ---
+# ... (PDF 部分保持不变，此处省略，核心改动在 render 函数) ...
+# 为了方便，这里还是提供完整代码
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER, TA_RIGHT
-
-# ==========================================
-# 🛠️ AVM 核心逻辑
-# ==========================================
 
 def get_address_template(project_name, blk, unit_str):
     try: street, postal = utils_address.find_address_info(project_name, blk)
@@ -130,10 +128,8 @@ def calculate_avm(df, target_blk, target_floor, target_stack, override_area=None
     extra_info = {'tenure': info_tenure, 'from': info_from, 'subtype': info_subtype, 'type': target_type, 'last_price': last_tx_price, 'last_date': last_tx_date}
     return est_price, weighted_psf, extra_info, recent_comps, est_area, floor_adj_rate, market_annual_growth, used_threshold
 
-# ==========================================
-# 📄 PDF 生成模块 (含 SSD 扣除逻辑)
-# ==========================================
 def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price, est_psf, comps_df, mailing_address, recipient_name="Dear Homeowner", last_price=0, last_date=None):
+    # (保持原有 PDF 逻辑不变)
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=72)
     styles = getSampleStyleSheet()
@@ -170,21 +166,16 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     if last_price > 0 and last_date is not None:
         ssd_rate, _, ssd_txt, _ = calculate_ssd_status(last_date)
         ssd_val = est_price * ssd_rate
-        
         gross_profit = est_price - last_price
         net_profit = gross_profit - ssd_val
         net_profit_pct = (net_profit / last_price) * 100
-        
         years_held = (datetime.now() - last_date).days / 365.0
         buy_date_str = last_date.strftime('%d %b %Y')
-        
         intro_text = f"Records indicate this unit was last purchased on <b>{buy_date_str}</b> for <b>${last_price/1e6:.2f}M</b>."
-        
         if ssd_rate > 0:
             intro_text += f" After accounting for an estimated Seller's Stamp Duty (SSD) of <b>${ssd_val/1e6:.2f}M ({ssd_txt})</b>, your projected net capital appreciation is:"
         else:
             intro_text += " Based on our current valuation, your estimated gross capital appreciation is:"
-            
         elements.append(Paragraph(intro_text, styles['Justify']))
         elements.append(Paragraph(f"<b>+${net_profit/1e6:.2f} Million ({net_profit_pct:.1f}%)</b>", styles['ProfitStyle']))
         elements.append(Paragraph(f"This represents a significant return over the past {years_held:.1f} years.", styles['Justify'])); elements.append(Spacer(1, 12))
@@ -195,7 +186,7 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     for _, row in display_comps.iterrows():
         c_unit = f"BLK {row['BLK']} {format_unit_masked(row['Floor_Num'])}" 
         data.append([row['Sale Date'].strftime('%d %b %Y'), c_unit, f"{int(row['Area (sqft)']):,}", f"${row['Sale Price']/1e6:.2f}M", f"${row['Unit Price ($ psf)']:,.0f}"])
-        
+    
     t = Table(data, colWidths=[1.2*inch, 1.5*inch, 0.8*inch, 1.0*inch, 0.8*inch])
     t.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.Color(0.2, 0.2, 0.6)), ('TEXTCOLOR', (0,0), (-1,0), colors.white), ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTSIZE', (0,0), (-1,-1), 8), ('GRID', (0,0), (-1,-1), 0.5, colors.grey)]))
     elements.append(t); elements.append(Spacer(1, 20))
@@ -208,11 +199,8 @@ def generate_pdf_letter(project_name, blk, floor, stack, area, u_type, est_price
     doc.build(elements); buffer.seek(0)
     return buffer
 
-# ==========================================
-# 🖥️ MAIN RENDER FUNCTION
-# ==========================================
-
-def render(df_raw, project_name="Project", chart_font_size=12):
+# [V237 Update] render 接收 chart_color
+def render(df_raw, project_name="Project", chart_font_size=12, chart_color="#2563eb"):
     st.subheader("🤖 智能估值 (AVM)")
     target = st.session_state.get('avm_target', None)
     if not target:
@@ -264,7 +252,6 @@ def render(df_raw, project_name="Project", chart_font_size=12):
             last_date = extra_info.get('last_date')
             ssd_rate, _, ssd_txt, _ = calculate_ssd_status(last_date)
             ssd_val = est_price * ssd_rate
-            
             net_profit = (est_price - last_price) - ssd_val
             net_pct = (net_profit / last_price) * 100
             
@@ -277,23 +264,20 @@ def render(df_raw, project_name="Project", chart_font_size=12):
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"<div style='margin-top:5px; margin-bottom:10px; font-size:14px; color:#15803d; font-weight:bold;'>📈 预计增值: +${net_profit/1e6:.2f}M ({net_pct:.1f}%)</div>", unsafe_allow_html=True)
-                
-        st.markdown(f"<div style='margin-top:10px; padding:10px; background:#2563eb; border-radius:4px; font-size:13px; color:white;'><strong>合理区间 (+/- 10%):</strong><br>${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M</div>", unsafe_allow_html=True)
-    with c2: st.plotly_chart(render_gauge(est_psf, chart_font_size), use_container_width=True, key=f"gauge_{blk}_{floor}_{stack}_{time.time()}")
+        
+        # [修改] 使用 chart_color 渲染背景块
+        st.markdown(f"<div style='margin-top:10px; padding:10px; background:{chart_color}; border-radius:4px; font-size:13px; color:white;'><strong>合理区间 (+/- 10%):</strong><br>${low_bound/1e6:.2f}M - ${high_bound/1e6:.2f}M</div>", unsafe_allow_html=True)
+
+    with c2: 
+        # [修改] 传入 chart_color 给仪表盘
+        st.plotly_chart(render_gauge(est_psf, chart_font_size, color=chart_color), use_container_width=True, key=f"gauge_{blk}_{floor}_{stack}_{time.time()}")
     st.divider()
 
-    # [V224 Add] 新增：该单元历史交易记录
+    # 历史记录
     df_temp = df.copy()
-    # 确保类型匹配
     df_temp['Floor_Int'] = pd.to_numeric(df_temp['Floor_Num'], errors='coerce').fillna(0).astype(int)
     target_floor_int = int(floor)
-    
-    unit_history = df_temp[
-        (df_temp['BLK'] == blk) & 
-        (df_temp['Stack'] == stack) & 
-        (df_temp['Floor_Int'] == target_floor_int)
-    ].copy()
-    
+    unit_history = df_temp[(df_temp['BLK'] == blk) & (df_temp['Stack'] == stack) & (df_temp['Floor_Int'] == target_floor_int)].copy()
     if not unit_history.empty:
         st.markdown("#### 📜 该单元历史交易 (Unit Transaction History)")
         render_transaction_table(unit_history)
