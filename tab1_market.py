@@ -4,8 +4,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 
-# V224 市场概览：带时间筛选和维度切换
-def render(df):
+# [V225 Fix] 更新函数签名以匹配 app.py 的调用 (接收4个参数)
+def render(df, chart_color="#2563eb", chart_font_size=12, inventory_map=None):
     st.subheader("📊 市场概览 (Market Overview)")
 
     # 1. 侧边栏/顶部筛选器
@@ -18,23 +18,32 @@ def render(df):
                 "时间维度 (Time Frequency):",
                 ["Yearly (按年)", "Quarterly (按季)", "Monthly (按月)"],
                 index=0,
-                horizontal=True
+                horizontal=True,
+                key="tab1_freq_mode" # 增加key防止状态丢失
             )
             
         # B. 日期范围滑块
         with col2:
+            if 'Sale Date' not in df.columns:
+                st.error("数据缺少 'Sale Date' 列")
+                return
+
             min_date = df['Sale Date'].min().date()
             max_date = df['Sale Date'].max().date()
             
             # 默认最近5年，如果数据不足5年则显示全部
-            default_start = max(min_date, max_date.replace(year=max_date.year - 5))
+            try:
+                default_start = max(min_date, max_date.replace(year=max_date.year - 5))
+            except:
+                default_start = min_date
             
             date_range = st.slider(
                 "日期范围 (Date Range):",
                 min_value=min_date,
                 max_value=max_date,
                 value=(default_start, max_date),
-                format="YYYY-MM-DD"
+                format="YYYY-MM-DD",
+                key="tab1_date_slider"
             )
 
     # 2. 数据处理
@@ -63,7 +72,7 @@ def render(df):
         Volume=('Unit Price ($ psf)', 'count')
     ).reset_index()
     trend_data.columns = ['Period', 'Avg PSF', 'Volume']
-    trend_data['Period'] = trend_data['Period'].astype(str) # 确保兼容性
+    trend_data['Period'] = trend_data['Period'].astype(str) 
 
     # 3. 关键指标卡片 (KPI Cards)
     kpi1, kpi2, kpi3 = st.columns(3)
@@ -88,13 +97,13 @@ def render(df):
         yaxis='y2'
     ))
 
-    # 折线图：平均尺价
+    # 折线图：平均尺价 (使用传入的 chart_color)
     fig.add_trace(go.Scatter(
         x=trend_data['Period'],
         y=trend_data['Avg PSF'],
         name="Avg PSF (平均尺价)",
         mode='lines+markers',
-        line=dict(color='#2563eb', width=3),
+        line=dict(color=chart_color, width=3),
         marker=dict(size=8)
     ))
 
@@ -104,8 +113,8 @@ def render(df):
         xaxis=dict(title=x_label, tickangle=-45),
         yaxis=dict(
             title="Avg Price ($ psf)",
-            titlefont=dict(color="#2563eb"),
-            tickfont=dict(color="#2563eb")
+            titlefont=dict(color=chart_color),
+            tickfont=dict(color=chart_color)
         ),
         yaxis2=dict(
             title="Volume (Units)",
@@ -118,7 +127,8 @@ def render(df):
         legend=dict(x=0.01, y=0.99),
         hovermode="x unified",
         margin=dict(l=20, r=20, t=40, b=20),
-        height=450
+        height=450,
+        font=dict(size=chart_font_size) # 使用传入的 font size
     )
 
     st.plotly_chart(fig, use_container_width=True)
